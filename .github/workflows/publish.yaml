@@ -378,7 +378,6 @@ jobs:
       max-parallel: 4
     timeout-minutes: 30
   restore-cached:
-    continue-on-error: true
     if: ${{ fromJSON(needs.cache-check.outputs.restore-matrix).include[0] != null }}
     name: Restore (cache hit)
     needs:
