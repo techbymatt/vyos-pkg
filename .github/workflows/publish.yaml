@@ -383,6 +383,8 @@ jobs:
     name: Restore (cache hit)
     needs:
       - cache-check
+    permissions:
+      packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
       - name: Restore the cached build
