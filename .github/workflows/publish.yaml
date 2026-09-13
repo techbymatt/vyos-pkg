@@ -387,6 +387,12 @@ jobs:
       packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
+      - name: Shadow zstd so the cache version matches the gzip archives
+        run: |
+          shim="$(mktemp -d)"
+          printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
+          chmod +x "$shim/zstd"
+          echo "$shim" >>"$GITHUB_PATH"
       - name: Restore the cached build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
