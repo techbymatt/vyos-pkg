@@ -1,6 +1,206 @@
 ---
 # $schema: https://json.schemastore.org/github-workflow.json
 jobs:
+  cache-check:
+    defaults:
+      run:
+        shell: bash
+    name: Cache check
+    outputs:
+      build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
+      build-matrix: ${{ steps.plan.outputs.build-matrix }}
+      restore-matrix: ${{ steps.plan.outputs.restore-matrix }}
+    permissions:
+      actions: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          owner: techbymatt
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - id: checkout
+        name: Checkout the tbm-vyos-patch repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          repository: techbymatt/tbm-vyos-patch
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+      - id: plan
+        name: Plan builds from the cache state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          packages=(
+            amazon-cloudwatch-agent
+            amazon-ssm-agent
+            aws-gwlbtun
+            bash-completion
+            blackbox_exporter
+            ddclient
+            dropbear
+            ethtool
+            frr
+            frr_exporter
+            hostap
+            hsflowd
+            iproute2
+            isc-dhcp
+            isc-kea
+            keepalived
+            libhtp
+            libnss-mapuser
+            libpam-radius-auth
+            linux-kernel
+            ndppd
+            net-snmp
+            netfilter
+            node_exporter
+            openssl
+            openvpn-otp
+            owamp
+            podman
+            pyhumps
+            radvd
+            shim-signed
+            squid
+            strongswan
+            tacacs
+            telegraf
+            udp-broadcast-relay
+            vyos-1x
+            waagent
+            wide-dhcpv6
+            xen-guest-agent
+            zerotier-one
+          )
+          extra_packages=(
+            hvinfo
+            ipaddrcheck
+            libnss-tacplus
+            libpam-tacplus
+            libtacplus-map
+            live-boot
+            vyatta-bash
+            vyatta-biosdevname
+            vyatta-cfg
+            vyos-http-api-tools
+            vyos-live-build
+          )
+
+          extra_package_deps() {
+            case "$1" in
+              hvinfo) echo "gnat gprbuild" ;;
+              ipaddrcheck) echo "check libcidr-dev" ;;
+              libnss-tacplus) echo "libaudit-dev libpam-tacplus-dev libtac-dev libtacplus-map-dev" ;;
+              libpam-tacplus) echo "autoconf-archive libaudit-dev libpam-dev libssl-dev libtacplus-map-dev" ;;
+              libtacplus-map) echo "autoconf-archive libaudit-dev" ;;
+              vyatta-bash) echo "bison libncurses5-dev" ;;
+              vyatta-biosdevname) echo "libpci-dev" ;;
+              vyatta-cfg) echo "bison flex libboost-filesystem-dev libglib2.0-dev" ;;
+              vyos-http-api-tools) echo "dh-virtualenv" ;;
+              *) echo "" ;;
+            esac
+          }
+
+          package_dir_commit() {
+            local package="$1"
+            if [[ "$package" == 'linux-kernel' ]]; then
+              git -C vyos-build log -n 1 --format=%H -- 'data/defaults.toml' "scripts/package-build/${package}/"
+            else
+              git -C vyos-build log -n 1 --format=%H -- "scripts/package-build/${package}/"
+            fi
+          }
+
+          extra_package_commit() {
+            local commit
+            commit="$(git ls-remote "https://github.com/vyos/${1}.git" refs/heads/rolling | cut -f1)" || true
+            printf '%s\n' "$commit"
+          }
+
+          record() {
+            local list="$1" outcome="$2" package="$3" arch="$4" commit="$5" deps="$6"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$list" "$outcome" "$package" "$arch" "$commit" "$deps" >>"${decisions}"
+            printf '%s/%s: cache %s (cache-%s-%s-%s)\n' \
+              "$package" "$arch" "$outcome" "$package" "$arch" "$commit"
+          }
+
+          check_and_record() {
+            local list="$1" package="$2" arch="$3" commit="$4" deps="$5"
+            if grep -Fxq "cache-${package}-${arch}-${commit}" "${cached_keys}"; then
+              record "$list" hit "$package" "$arch" "$commit" "$deps"
+            else
+              record "$list" miss "$package" "$arch" "$commit" "$deps"
+            fi
+          }
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+          decisions="${workdir}/decisions.tsv"
+          cached_keys="${workdir}/cached-keys.txt"
+
+          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
+          DEFAULT_BRANCH="${default_branch}" gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[]
+                  | select(.ref == env.GITHUB_REF or .ref == "refs/heads/" + env.DEFAULT_BRANCH)
+                  | .key' \
+            >"${cached_keys}"
+
+          for package in "${packages[@]}"; do
+            commit="$(package_dir_commit "$package")"
+            for arch in amd64 arm64; do
+              if [[ "$arch" == 'arm64' && "$package" == 'shim-signed' ]]; then
+                continue
+              fi
+              check_and_record build "$package" "$arch" "$commit" ''
+            done
+          done
+
+          for package in "${extra_packages[@]}"; do
+            commit="$(extra_package_commit "$package")"
+            for arch in amd64 arm64; do
+              check_and_record build-extra "$package" "$arch" "$commit" "$(extra_package_deps "$package")"
+            done
+          done
+
+          jq -rRs '
+            def runner_label:
+              if . == "amd64" then "ubuntu-24.04" else "ubuntu-24.04-arm" end;
+            def entry:
+              {
+                package: .[2],
+                arch: .[3],
+                runner_label: (.[3] | runner_label),
+                commit: .[4],
+                group: .[0]
+              }
+              + (if .[5] == "" then {} else {deps: .[5]} end);
+            rtrimstr("\n")
+            | split("\n")
+            | map(select(length > 0) | split("\t"))
+            | {
+                "build-matrix": {
+                  include: [.[] | select(.[0] == "build" and .[1] == "miss") | entry]
+                },
+                "build-extra-matrix": {
+                  include: [.[] | select(.[0] == "build-extra" and .[1] == "miss") | entry]
+                },
+                "restore-matrix": {
+                  include: ([.[] | select(.[0] == "build" and .[1] == "hit") | entry]
+                            + [.[] | select(.[0] == "build-extra" and .[1] == "hit") | entry])
+                }
+              }
+            | to_entries[]
+            | "\(.key)=\(.value)"
+          ' "${decisions}" >>"${GITHUB_OUTPUT}"
+    timeout-minutes: 30
   build:
     container:
       env:
@@ -10,7 +210,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    if: ${{ fromJSON(needs.cache-check.outputs.build-matrix).include[0] != null }}
     name: Build (container)
+    needs:
+      - cache-check
     permissions:
       packages: read
     runs-on: ${{ matrix.runner_label }}
@@ -88,6 +291,7 @@ jobs:
       - name: Upload the remaining build files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          if-no-files-found: ignore
           name: build-${{ matrix.package }}-${{ matrix.arch }}
           path: |
             vyos-build/scripts/package-build/**/*.buildinfo
@@ -97,61 +301,8 @@ jobs:
             vyos-build/scripts/package-build/**/*orig.tar.*
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        package:
-          - amazon-cloudwatch-agent
-          - amazon-ssm-agent
-          - aws-gwlbtun
-          - bash-completion
-          - blackbox_exporter
-          - ddclient
-          - dropbear
-          - ethtool
-          - frr
-          - frr_exporter
-          - hostap
-          - hsflowd
-          - iproute2
-          - isc-dhcp
-          - isc-kea
-          - keepalived
-          - libhtp
-          - libnss-mapuser
-          - libpam-radius-auth
-          - linux-kernel
-          - ndppd
-          - net-snmp
-          - netfilter
-          - node_exporter
-          - openssl
-          - openvpn-otp
-          - owamp
-          - podman
-          - pyhumps
-          - radvd
-          - shim-signed
-          - squid
-          - strongswan
-          - tacacs
-          - telegraf
-          - udp-broadcast-relay
-          # - unionfs-fuse
-          # - vpp
-          - vyos-1x
-          - waagent
-          - wide-dhcpv6
-          - xen-guest-agent
-          - zerotier-one
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-        exclude:
-          - arch: arm64
-            package: shim-signed
-      max-parallel: 8
+      matrix: ${{ fromJSON(needs.cache-check.outputs.build-matrix) }}
+      max-parallel: 4
     timeout-minutes: 150
   build-extra:
     container:
@@ -162,7 +313,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    if: ${{ fromJSON(needs.cache-check.outputs.build-extra-matrix).include[0] != null }}
     name: Build (extra)
+    needs:
+      - cache-check
     permissions:
       packages: read
     runs-on: ${{ matrix.runner_label }}
@@ -172,7 +326,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: packages/${{ matrix.package }}
-          ref: rolling
+          ref: ${{ matrix.commit }}
           repository: vyos/${{ matrix.package }}
       - if: ${{ matrix.deps }}
         name: Install dependencies
@@ -183,7 +337,7 @@ jobs:
         name: Cache build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ steps.checkout.outputs.commit }}
+          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ matrix.commit }}
           path: |
             packages/*.deb
             packages/*.buildinfo
@@ -210,6 +364,7 @@ jobs:
       - name: Upload the remaining build files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          if-no-files-found: ignore
           name: build-${{ matrix.package }}-${{ matrix.arch }}
           path: |
             packages/*.buildinfo
@@ -219,45 +374,56 @@ jobs:
             packages/*orig.tar.*
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        package:
-          - hvinfo
-          - ipaddrcheck
-          - libnss-tacplus
-          - libpam-tacplus
-          - libtacplus-map
-          - live-boot
-          - vyatta-bash
-          - vyatta-biosdevname
-          - vyatta-cfg
-          - vyos-http-api-tools
-          - vyos-live-build
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-          - deps: gnat gprbuild
-            package: hvinfo
-          - deps: check libcidr-dev
-            package: ipaddrcheck
-          - deps: libaudit-dev libpam-tacplus-dev libtac-dev libtacplus-map-dev
-            package: libnss-tacplus
-          - deps: autoconf-archive libaudit-dev libpam-dev libssl-dev libtacplus-map-dev
-            package: libpam-tacplus
-          - deps: autoconf-archive libaudit-dev
-            package: libtacplus-map
-          - deps: bison libncurses5-dev
-            package: vyatta-bash
-          - deps: libpci-dev
-            package: vyatta-biosdevname
-          - deps: bison flex libboost-filesystem-dev libglib2.0-dev
-            package: vyatta-cfg
-          - deps: dh-virtualenv
-            package: vyos-http-api-tools
+      matrix: ${{ fromJSON(needs.cache-check.outputs.build-extra-matrix) }}
       max-parallel: 4
     timeout-minutes: 30
+  restore-cached:
+    if: ${{ fromJSON(needs.cache-check.outputs.restore-matrix).include[0] != null }}
+    name: Restore (cache hit)
+    needs:
+      - cache-check
+    permissions:
+      packages: read
+    runs-on: ${{ matrix.runner_label }}
+    steps:
+      - name: Shadow zstd so the cache version matches the gzip archives
+        run: |
+          shim="$(mktemp -d)"
+          printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
+          chmod +x "$shim/zstd"
+          echo "$shim" >>"$GITHUB_PATH"
+      - name: Restore the cached build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ matrix.commit }}
+          path: |
+            ${{ matrix.group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', matrix.package) || 'packages/*.deb' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
+      - name: Upload the .deb files as artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          if-no-files-found: error
+          name: deb-${{ matrix.package }}-${{ matrix.arch }}
+          path: ${{ matrix.group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', matrix.package) || 'packages/*.deb' }}
+      - name: Upload the remaining build files as artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          if-no-files-found: ignore
+          name: build-${{ matrix.package }}-${{ matrix.arch }}
+          path: |
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
+            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.cache-check.outputs.restore-matrix) }}
+    timeout-minutes: 20
   verify:
     container:
       env:
@@ -267,10 +433,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
     name: Verify
     needs:
       - build
       - build-extra
+      - restore-cached
     permissions:
       packages: read
     runs-on: ${{ matrix.runner_label }}
