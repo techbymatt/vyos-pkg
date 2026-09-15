@@ -62,6 +62,7 @@ jobs:
             netfilter
             node_exporter
             openssl
+            openvpn
             openvpn-otp
             owamp
             podman
