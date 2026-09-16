@@ -4,5 +4,4 @@ poetry.lock
 *.dsc
 __pycache__/
 .DS_Store
-.aider*
 .ori
