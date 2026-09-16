@@ -35,6 +35,11 @@ verification first simulates a combined installation. Compatible packages use
 one APT transaction; conflicting sets retain sequential installation. A real
 installation failure always fails verification.
 
+Verification installs generic-image flavor metadata before package installation,
+including the serial-console settings required by `vyos-1x-smoketest`. These
+settings come from the run's pinned, patched `vyos-build` defaults, build type,
+architecture, and generic flavor, rather than fixed values in the workflow.
+
 Run the local checks with:
 
 ```sh
@@ -43,4 +48,5 @@ pre-commit run --all-files
 actionlint .github/workflows/publish.yaml
 ```
 
-The tests use Python's standard library and the workflow's existing `jq` tool.
+The tests use Python 3.11+ (including standard-library `tomllib`) and the workflow's
+existing `jq` tool.
