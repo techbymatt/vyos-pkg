@@ -12,3 +12,11 @@ repos:
   hooks:
   - id: end-of-file-fixer
   - id: trailing-whitespace
+- repo: local
+  hooks:
+  - id: publish-tools-tests
+    name: Publish workflow tool tests
+    entry: python3 -m unittest discover -s scripts
+    language: system
+    pass_filenames: false
+    files: ^(scripts/|\.github/(workflows/publish\.yaml|actions/restore-package/))
