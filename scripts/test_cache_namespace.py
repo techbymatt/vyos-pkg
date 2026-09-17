@@ -50,6 +50,7 @@ runs:
 """
 
 INPUTS = ("image", "patch-tree", "shared", "data-tree")
+DEPENDENCIES = '#!/usr/bin/env bash\necho "gnat gprbuild"\n'
 
 
 class NamespaceTests(unittest.TestCase):
@@ -63,6 +64,9 @@ class NamespaceTests(unittest.TestCase):
         composite = self.workflow / ".github/actions/restore-package"
         composite.mkdir(parents=True)
         (composite / "action.yaml").write_text(COMPOSITE, encoding="utf-8")
+        dependencies = self.workflow / cn.DEPENDENCIES_RELATIVE
+        dependencies.parent.mkdir(parents=True)
+        dependencies.write_text(DEPENDENCIES, encoding="utf-8")
 
     def namespace(self) -> str:
         return cn.namespace(*INPUTS, self.workflow)
@@ -76,7 +80,7 @@ class NamespaceTests(unittest.TestCase):
             cn.build_surface(self.workflow),
             "  build:\n    name: Build\n    steps:\n      - run: docker run image\n"
             "  build-extra:\n    name: Build extra\n    steps:\n"
-            "      - run: docker build\n" + COMPOSITE,
+            "      - run: docker build\n" + COMPOSITE + DEPENDENCIES,
         )
 
     def test_last_job_block_extends_to_the_end_of_the_file(self) -> None:
@@ -111,6 +115,27 @@ class NamespaceTests(unittest.TestCase):
         composite = self.workflow / ".github/actions/restore-package/action.yaml"
         composite.write_text(COMPOSITE + "      - run: extra\n", encoding="utf-8")
         self.assertNotEqual(self.namespace(), before)
+
+    def test_publication_edits_do_not_change_the_namespace(self) -> None:
+        publish = "  publish:\n    steps:\n      - run: deploy\n"
+        self.write_workflow(WORKFLOW + publish)
+        before = self.namespace()
+        self.write_workflow(WORKFLOW + publish.replace("deploy", "deploy differently"))
+        self.assertEqual(self.namespace(), before)
+
+    def test_dependency_edits_change_the_namespace(self) -> None:
+        before = self.namespace()
+        dependencies = self.workflow / cn.DEPENDENCIES_RELATIVE
+        dependencies.write_text(
+            DEPENDENCIES.replace("gnat gprbuild", "gnat gprbuild libssl-dev"),
+            encoding="utf-8",
+        )
+        self.assertNotEqual(self.namespace(), before)
+
+    def test_missing_dependency_file_is_rejected(self) -> None:
+        (self.workflow / cn.DEPENDENCIES_RELATIVE).unlink()
+        with self.assertRaises(OSError):
+            self.namespace()
 
     def test_each_non_recipe_input_changes_the_namespace(self) -> None:
         for index in range(len(INPUTS)):

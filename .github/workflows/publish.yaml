@@ -120,21 +120,6 @@ jobs:
             vyos-live-build
           )
 
-          extra_package_deps() {
-            case "$1" in
-              hvinfo) echo "gnat gprbuild" ;;
-              ipaddrcheck) echo "check libcidr-dev" ;;
-              libnss-tacplus) echo "libaudit-dev libpam-tacplus-dev libtac-dev libtacplus-map-dev" ;;
-              libpam-tacplus) echo "autoconf-archive libaudit-dev libpam-dev libssl-dev libtacplus-map-dev" ;;
-              libtacplus-map) echo "autoconf-archive libaudit-dev" ;;
-              vyatta-bash) echo "bison libncurses5-dev" ;;
-              vyatta-biosdevname) echo "libpci-dev" ;;
-              vyatta-cfg) echo "bison flex libboost-filesystem-dev libglib2.0-dev" ;;
-              vyos-http-api-tools) echo "dh-virtualenv" ;;
-              *) echo "" ;;
-            esac
-          }
-
           package_dir_commit() {
             local package="$1"
             if [[ "$package" == 'linux-kernel' ]]; then
@@ -201,8 +186,9 @@ jobs:
 
           for package in "${extra_packages[@]}"; do
             commit="$(extra_package_commit "$package")"
+            deps="$(bash ../workflow/scripts/package_dependencies.sh "$package")"
             for arch in amd64 arm64; do
-              check_and_record build-extra "$package" "$arch" "$commit" "$(extra_package_deps "$package")"
+              check_and_record build-extra "$package" "$arch" "$commit" "$deps"
             done
           done
 

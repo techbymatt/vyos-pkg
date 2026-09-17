@@ -13,7 +13,7 @@ The scheduled publish workflow compares its recorded inputs with `input-manifest
 
 The manifest is deployed together with the repository, so a failed build or deployment cannot advance the published baseline. Runs are serialized to avoid overlapping publications. The first run after these changes rebuilds packages under the new cache-key namespace.
 
-Package cache keys include a namespace covering only build-affecting inputs: the build-image digest, the patch tree, shared upstream build inputs, upstream build data, the build and build-extra jobs, and the restore-package composite. Edits to verification or publication logic do not change the namespace, so they no longer rebuild packages.
+Package cache keys include a namespace covering only build-affecting inputs: the build-image digest, the patch tree, shared upstream build inputs, upstream build data, the build and build-extra jobs, the restore-package composite, and `scripts/package_dependencies.sh`. Edits to verification or publication logic do not change the namespace, so they no longer rebuild packages.
 
 Live APT repositories and moving source refs inside upstream build recipes are not locked by this manifest. To refresh those inputs, run **Repository** manually with **force_rebuild** enabled. This bypasses all package caches and republishes after verification; later runs can reuse the refreshed caches. Also use this option after rotating signing credentials, and update the checked-in public key when changing signing identity.
 
