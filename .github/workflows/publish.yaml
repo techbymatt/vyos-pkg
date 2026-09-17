@@ -176,10 +176,11 @@ jobs:
           patch_commit="$(git rev-parse HEAD)"
           echo "patch-commit=$patch_commit" >> "$GITHUB_OUTPUT"
           shared_build_inputs="$(git -C vyos-build ls-tree HEAD scripts/package-build/ | awk '$2 != "tree"')"
-          cache_namespace="$(printf '%s\n' "$BUILD_IMAGE" "$(git rev-parse HEAD:patches)" \
-            "$shared_build_inputs" "$(git -C vyos-build rev-parse HEAD:data)" \
-            "$(git -C ../workflow rev-parse HEAD:.github/workflows/publish.yaml)" \
-            "$(git -C ../workflow rev-parse HEAD:scripts/publish_matrix.jq)" | sha256sum | cut -d' ' -f1)"
+          cache_namespace="$(python3 ../workflow/scripts/cache_namespace.py \
+            --build-image "$BUILD_IMAGE" --patch-tree "$(git rev-parse HEAD:patches)" \
+            --shared-build-inputs "$shared_build_inputs" \
+            --data-tree "$(git -C vyos-build rev-parse HEAD:data)" \
+            --workflow ../workflow)"
           default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
