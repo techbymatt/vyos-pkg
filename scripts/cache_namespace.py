@@ -4,7 +4,8 @@
 Inputs that cannot change package bytes are deliberately excluded: edits to
 verification or publication jobs must not invalidate package caches. The
 workflow surface is the text of the build and build-extra jobs plus the
-restore-package composite action, extracted from the checked-out repository.
+restore-package composite action and package dependency mapping, read from the
+checked-out repository.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 
 WORKFLOW_RELATIVE = Path(".github/workflows/publish.yaml")
 COMPOSITE_RELATIVE = Path(".github/actions/restore-package/action.yaml")
+DEPENDENCIES_RELATIVE = Path("scripts/package_dependencies.sh")
 JOB_PATTERN = re.compile(r"^  ([A-Za-z0-9_-]+):$")
 RECIPE_JOBS = ("build", "build-extra")
 
@@ -48,6 +50,7 @@ def build_surface(workflow: Path) -> str:
     text = (workflow / WORKFLOW_RELATIVE).read_text(encoding="utf-8")
     parts = [job_text(text, job) for job in RECIPE_JOBS]
     parts.append((workflow / COMPOSITE_RELATIVE).read_text(encoding="utf-8"))
+    parts.append((workflow / DEPENDENCIES_RELATIVE).read_text(encoding="utf-8"))
     return "".join(parts)
 
 
