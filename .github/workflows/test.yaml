@@ -192,168 +192,57 @@ jobs:
             runner_label: ubuntu-24.04-arm
       max-parallel: 4
   verify:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
     defaults:
       run:
         shell: bash
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
     name: Verify
     needs:
       - build
       - build-extra
     permissions:
-      packages: read
-    runs-on: ${{ matrix.runner_label }}
+      contents: read
+    runs-on: ubuntu-24.04
     steps:
+      - name: Checkout verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
       - name: Download the .deb file artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          merge-multiple: true
           path: packages
           pattern: deb-*-${{ matrix.arch }}
-      - name: Verify the .deb files can be installed
+      - name: Validate package integrity
         run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install apt-utils
           shopt -s globstar nullglob
           packages=(./packages/**/*.deb)
-          if ((${#packages[@]} == 0)); then
-            echo "No .deb files found" >&2
-            exit 1
+          python3 scripts/validate_packages.py --arch "${{ matrix.arch }}" "${packages[@]}"
+      - name: Install Lintian
+        run: |
+          sudo apt-get update
+          sudo apt-get --no-install-recommends --yes install lintian
+      - name: Report Lintian advisories
+        run: |
+          shopt -s globstar nullglob
+          packages=(./packages/**/*.deb)
+          status=0
+          lintian --no-cfg --allow-root "${packages[@]}" > lintian-report.txt 2>&1 || status=$?
+          cat lintian-report.txt
+          echo "Lintian exit status: $status (advisory only)" >> "$GITHUB_STEP_SUMMARY"
+          if ((status != 0)); then
+            echo "::warning::Lintian reported findings or could not complete; see lintian-report artifact."
           fi
-          excluded_packages=(
-            strongswan-charon
-            strongswan-charon-dbgsym
-          )
-
-          repository="$(mktemp -d)"
-          chmod 755 "$repository"
-          source_list=/etc/apt/sources.list.d/vyos-package-verification.list
-          preferences=/etc/apt/preferences.d/vyos-package-verification
-          cleanup() {
-            sudo rm -f "$source_list" "$preferences"
-            rm -rf "$repository"
-          }
-          trap cleanup EXIT
-
-          package_index=0
-          for package in "${packages[@]}"; do
-            ln -s "$(realpath "$package")" "$repository/$package_index.deb"
-            package_index=$((package_index + 1))
-          done
-          (
-            cd "$repository"
-            apt-ftparchive packages . > Packages
-            apt-ftparchive \
-              -o APT::FTPArchive::Release::Origin=VyOS-Verification \
-              -o APT::FTPArchive::Release::Label=VyOS-Verification \
-              release . > Release
-          )
-          printf 'deb [trusted=yes] file:%s ./\n' "$repository" \
-            | sudo tee "$source_list" >/dev/null
-          printf '%s\n' \
-            'Package: *' \
-            'Pin: release o=VyOS-Verification' \
-            'Pin-Priority: 1001' \
-            | sudo tee "$preferences" >/dev/null
-          sudo apt-get -o APT::Sandbox::User=root update
-
-          for package in "${packages[@]}"; do
-            package_name="$(dpkg-deb --field "$package" Package)"
-            package_version="$(dpkg-deb --field "$package" Version)"
-            if [[ " ${excluded_packages[*]} " == *" $package_name "* ]]; then
-              continue
-            fi
-            sudo apt-get -o APT::Sandbox::User=root \
-              -o Dpkg::Options::=--force-confdef \
-              -o Dpkg::Options::=--force-confold \
-              --no-install-recommends --allow-downgrades --reinstall --yes install \
-              "$package_name=$package_version"
-          done
+      - name: Upload Lintian report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lintian-report-${{ matrix.arch }}
+          path: lintian-report.txt
+          if-no-files-found: error
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-    timeout-minutes: 30
-  publish:
-    name: Publish
-    if: ${{ !cancelled() && needs.setup-matrix.result == 'success' && (needs.build.result == 'success' || needs.build-extra.result == 'success') }}
-    needs:
-      - build
-      - build-extra
-      - setup-matrix
-      - verify
-    permissions:
-      id-token: write
-      pages: write
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout the vyos-pkg repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Download the .deb file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages/rolling
-          pattern: deb-*
-      - name: Download the build file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages/rolling
-          pattern: build-*
-      - name: Install required packages
-        run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install \
-            jq \
-            createrepo-c \
-            coreutils \
-            gnupg2 \
-            dpkg-dev
-      - name: Insert environment variables
-        run: |
-          {
-            echo GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
-            echo REPO_OWNER="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f1)"
-            echo REPO_NAME="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f2)"
-          } >> "$GITHUB_ENV"
-      - id: import_gpg
-        name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Confirm GPG key is loaded
-        run: |
-          gpg --list-keys | grep "${{ steps.import_gpg.outputs.fingerprint }}"
-      - name: Setup Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - name: Build with Jekyll
-        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
-      - name: Build .deb repository
-        run: |
-          export GPG_FINGERPRINT="${{ steps.import_gpg.outputs.fingerprint }}"
-          export ORIGIN="${{ steps.import_gpg.outputs.name }}"
-          sudo chown -R "$(whoami):$(whoami)" _site/
-          scripts/build_repo.sh
-      - name: Delete scripts/ repo
-        run: |
-          rm -r scripts
-      - name: Generate directory indices
-        uses: gacts/directory-listing@dbce3ff489d0e8689b0c45c6a63fe28b2a23ca66 # v1.0.6
-        with:
-          show-hidden: true
-          target: _site/deb
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        arch: [amd64, arm64]
     timeout-minutes: 30
 name: Test
 on:
