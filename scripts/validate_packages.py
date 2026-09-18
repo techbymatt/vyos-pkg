@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -125,9 +126,20 @@ def validate_packages(paths: list[Path], arch: str) -> None:
     _validate_packages([(path, arch) for path in paths])
 
 
-def validate_artifacts(directory: Path) -> None:
-    """Validate unmerged deb-* downloads from both architecture build jobs."""
-    groups: dict[str, list[Path]] = {"amd64": [], "arm64": []}
+def validate_artifacts(
+    directory: Path, expected_arches: tuple[str, ...] | list[str] = ("amd64", "arm64")
+) -> None:
+    """Validate unmerged downloads together, requiring exactly the planned arches."""
+    if (
+        not isinstance(expected_arches, (list, tuple))
+        or not expected_arches
+        or any(arch not in ("amd64", "arm64") for arch in expected_arches)
+        or len(set(expected_arches)) != len(expected_arches)
+    ):
+        raise ValueError(
+            "expected architectures must be a nonempty unique amd64/arm64 list"
+        )
+    groups: dict[str, list[Path]] = {arch: [] for arch in expected_arches}
     try:
         for child in sorted(directory.iterdir()):
             if not child.is_dir():
@@ -135,7 +147,12 @@ def validate_artifacts(directory: Path) -> None:
             match = re.fullmatch(r"deb-.*-(amd64|arm64)", child.name)
             if match is None:
                 raise ValueError(f"unknown artifact directory name: {child.name}")
-            groups[match[1]].extend(sorted(child.rglob("*.deb")))
+            if match[1] not in groups:
+                raise ValueError(f"unexpected artifact architecture group: {match[1]}")
+            paths = sorted(child.rglob("*.deb"))
+            if not paths:
+                raise ValueError(f"empty artifact directory: {child.name}")
+            groups[match[1]].extend(paths)
     except OSError as error:
         raise ValueError(f"{directory}: {error}") from error
     for arch, paths in groups.items():
@@ -192,15 +209,20 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--arch", choices=("amd64", "arm64"))
     mode.add_argument("--artifacts", type=Path, metavar="DIRECTORY")
+    parser.add_argument("--expected-arches", type=json.loads, metavar="JSON")
     parser.add_argument("packages", type=Path, nargs="*")
     args = parser.parse_args(argv)
     if args.artifacts is not None and args.packages:
         parser.error("--artifacts cannot be combined with package paths")
     if args.arch is not None and not args.packages:
         parser.error("--arch requires at least one package path")
+    if args.expected_arches is not None and args.artifacts is None:
+        parser.error("--expected-arches requires --artifacts")
+    if args.artifacts is not None and args.expected_arches is None:
+        parser.error("--artifacts requires --expected-arches")
     try:
         if args.artifacts is not None:
-            validate_artifacts(args.artifacts)
+            validate_artifacts(args.artifacts, args.expected_arches)
         else:
             validate_packages(args.packages, args.arch)
     except ValueError as error:

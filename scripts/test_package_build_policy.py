@@ -29,20 +29,11 @@ class PolicyTests(unittest.TestCase):
         for package in ("net-snmp", "frr", "strongswan", "linux-kernel", "vyos-1x"):
             self.assertEqual(policy.architectures("build", package), ["amd64", "arm64"])
         self.assertEqual(policy.architectures("build", "shim-signed"), ["amd64"])
-
-    def test_extra_matrix_combines_dependencies_without_duplicating_builds(
-        self,
-    ) -> None:
-        entries = policy.matrix(
-            "build-extra", ["live-boot", "hvinfo"], ["liba", "libb"]
-        )["include"]
+        self.assertFalse(policy.independent_only("build", "shim-signed"))
+        self.assertTrue(policy.independent_only("build", "pyhumps"))
         self.assertEqual(
-            [(e["package"], e["arch"]) for e in entries],
-            [("live-boot", "amd64"), ("hvinfo", "amd64"), ("hvinfo", "arm64")],
+            policy.architectures("build", "unknown-test-source"), ["amd64", "arm64"]
         )
-        self.assertTrue(all(e["deps"] == "liba libb" for e in entries))
-        self.assertEqual(entries[-1]["runner_label"], "ubuntu-24.04-arm")
-        self.assertEqual(policy.matrix("build", [], []), {"include": []})
 
     def test_output_policy_uses_control_metadata_not_filename(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

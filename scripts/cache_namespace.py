@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Compute the package cache namespace from build-affecting inputs only.
 
-Inputs that cannot change package bytes are deliberately excluded: edits to
-verification or publication jobs must not invalidate package caches. The
-workflow surface is the text of the build and build-extra jobs plus the
-restore-package composite action, dependency mapping, and package build policy
-and adaptations, read from the checked-out repository.
+Hash whole shared build recipes, artifact/cache actions, and build helpers.
+Caller publish/test workflows only orchestrate these shared inputs and are
+excluded, as are verification, publication, and documentation files. The build
+image digest and upstream trees are supplied separately by the caller.
 """
 
 from __future__ import annotations
@@ -16,20 +15,23 @@ import re
 import sys
 from pathlib import Path
 
-WORKFLOW_RELATIVE = Path(".github/workflows/publish.yaml")
-COMPOSITE_RELATIVE = Path(".github/actions/restore-package/action.yaml")
-DEPENDENCIES_RELATIVE = Path("scripts/package_dependencies.sh")
-POLICY_RELATIVES = (
-    Path("scripts/package_build_policy.json"),
+BUILD_INPUTS = (
+    Path(".github/workflows/build-recipe.yaml"),
+    Path(".github/workflows/build-standalone.yaml"),
+    Path(".github/actions/package-paths/action.yaml"),
+    Path(".github/actions/package-artifacts/action.yaml"),
+    Path(".github/actions/restore-package/action.yaml"),
+    Path("scripts/package_catalog.json"),
+    Path("scripts/package_catalog.py"),
     Path("scripts/package_build_policy.py"),
     Path("scripts/prepare_package_build.py"),
+    Path("scripts/plan_builds.py"),
 )
 JOB_PATTERN = re.compile(r"^  ([A-Za-z0-9_-]+):$")
-RECIPE_JOBS = ("build", "build-extra")
 
 
 def job_text(workflow: str, job: str) -> str:
-    """Return the text of a two-space-indented job block from workflow YAML."""
+    """Extract a job for workflow contract tests; not used for cache hashing."""
     lines = workflow.splitlines()
     start: int | None = None
     end: int | None = None
@@ -51,14 +53,16 @@ def job_text(workflow: str, job: str) -> str:
     return "\n".join(lines[start:end]) + "\n"
 
 
-def build_surface(workflow: Path) -> str:
-    text = (workflow / WORKFLOW_RELATIVE).read_text(encoding="utf-8")
-    parts = [job_text(text, job) for job in RECIPE_JOBS]
-    parts.append((workflow / COMPOSITE_RELATIVE).read_text(encoding="utf-8"))
-    parts.append((workflow / DEPENDENCIES_RELATIVE).read_text(encoding="utf-8"))
-    for relative in POLICY_RELATIVES:
-        parts.append((workflow / relative).read_text(encoding="utf-8"))
-    return "".join(parts)
+def build_surface(workflow: Path) -> bytes:
+    """Read required inputs, framing paths and bytes to preserve boundaries."""
+    parts = []
+    for relative in BUILD_INPUTS:
+        for value in (
+            relative.as_posix().encode("utf-8"),
+            (workflow / relative).read_bytes(),
+        ):
+            parts.extend((str(len(value)).encode("ascii"), b":", value))
+    return b"".join(parts)
 
 
 def namespace(
@@ -74,10 +78,10 @@ def namespace(
         patch_tree,
         shared_build_inputs,
         data_tree,
-        build_surface(workflow),
     ):
         digest.update(value.encode("utf-8"))
         digest.update(b"\x00")
+    digest.update(build_surface(workflow))
     return digest.hexdigest()
 
 

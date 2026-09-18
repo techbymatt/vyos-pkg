@@ -1,299 +1,131 @@
 #!/bin/bash
-# Build Debian package repositories for VyOS
-# Usage: ./build_repo.sh
-
+# Assemble and sign the repository after Jekyll has generated _site.
 set -euo pipefail
 
-# Constants
 readonly SITE_DIR="_site"
-readonly SUPPORTED_BRANCHES=("rolling")
-readonly DEB_COMPONENTS="main"
-readonly SOURCE_DIR="packages"
-ARCHITECTURES=("all" "amd64" "arm64")
-# GPG key resolution: prefer GPG_FINGERPRINT (set by CI), fall back to GPG_KEY_ID
+readonly SOURCE_DIR="packages/rolling"
+readonly REPO_DIR="${SITE_DIR}/deb"
+readonly ARTIFACT_LIST="${REPO_DIR}/.artifacts"
 readonly GPG_KEY_ID="${GPG_FINGERPRINT:-${GPG_KEY_ID:-}}"
-# GPG_TTY: only capture when running in an interactive terminal
-if [[ -t 0 ]]; then
-	export GPG_TTY
-else
-	unset GPG_TTY 2>/dev/null || true
-fi
-
-# Logging configuration
-readonly DEBUG=false
-
-# Check required environment variables and tools
-check_env_vars() {
-	# REPO_OWNER is required unless ORIGIN is set (e.g. from CI GPG step)
-	if [[ -z "${REPO_OWNER:-}" ]]; then
-		if [[ -n "${ORIGIN:-}" ]]; then
-			REPO_OWNER="${ORIGIN}"
-			info "Using ORIGIN (${ORIGIN}) as REPO_OWNER"
-		else
-			echo "Error: Required environment variable REPO_OWNER is not set" >&2
-			exit 1
-		fi
-	fi
-
-	# Verify GPG is properly configured
-	if ! gpg --list-secret-keys >/dev/null 2>&1; then
-		error "No GPG secret keys found. Repository signing will fail."
-	fi
-
-	if [[ -n "${GPG_KEY_ID}" ]]; then
-		if ! gpg --list-secret-keys "${GPG_KEY_ID}" >/dev/null 2>&1; then
-			error "Specified GPG key ${GPG_KEY_ID} not found"
-		fi
-		info "Using GPG key: ${GPG_KEY_ID}"
-	fi
-}
-
-log_message() {
-	local level="$1"
-	local message="$2"
-	echo "${level}: ${message}" >&2
-}
+readonly REPO_OWNER="${REPO_OWNER:-${ORIGIN:-}}"
+readonly ARCHITECTURES=(all amd64 arm64)
 
 error() {
-	log_message "ERROR" "$1"
+	printf 'ERROR: %s\n' "$*" >&2
 	exit 1
 }
 
-warning() {
-	log_message "WARNING" "$1"
-}
-
-info() {
-	log_message "INFO" "$1"
-}
-
-move_debs() {
-	local branch="$1"
-	local target_dir="$2"
-	local source_path="${SOURCE_DIR}/${branch}"
-	local moved=0
-
-	if [[ ! -d "${source_path}" ]]; then
-		warning "Source directory ${source_path} not found, skipping move"
-		return 0
+check_inputs() {
+	local cmd keys
+	[[ -n "$REPO_OWNER" ]] || error "Set REPO_OWNER or ORIGIN"
+	[[ -d "$SITE_DIR" ]] || error "Missing Jekyll output directory: $SITE_DIR"
+	[[ -d "$SOURCE_DIR" ]] || error "Missing package input directory: $SOURCE_DIR"
+	for cmd in dpkg-scanpackages dpkg-scansources gpg gzip bzip2 find sort \
+		md5sum sha1sum sha256sum wc date mkdir mv rm; do
+		command -v "$cmd" >/dev/null || error "Required command '$cmd' not found"
+	done
+	if [[ -n "$GPG_KEY_ID" ]]; then
+		keys=$(gpg --with-colons --list-secret-keys "$GPG_KEY_ID") || error "Cannot list signing key"
+	else
+		keys=$(gpg --with-colons --list-secret-keys) || error "Cannot list signing key"
 	fi
+	[[ "$keys" == sec:* || "$keys" == *$'\nsec:'* ]] || error "No GPG secret signing key found"
+}
 
-	info "Moving .deb packages from ${source_path}..."
-	mkdir -p "${target_dir}"
+collect_artifacts() {
+	local file
+	local artifacts=() deb_count=0
+	mkdir -p "$REPO_DIR/pool/main"
+	# A foreground find makes traversal failures fatal, unlike process substitution.
+	find "$SOURCE_DIR" -type f \( -name '*.deb' -o -name '*.dsc' \
+		-o -name '*.tar.gz' -o -name '*.tar.xz' -o -name '*.tar.bz2' \
+		-o -name '*.changes' \) -print0 >"$ARTIFACT_LIST"
 	while IFS= read -r -d '' file; do
-		if mv "$file" "${target_dir}/"; then
-			((moved++))
-		else
-			error "Failed to move $file"
+		artifacts+=("$file")
+		if [[ "$file" == *.deb ]]; then
+			deb_count=$((deb_count + 1))
 		fi
-	done < <(find "${source_path}" -name "*.deb" -type f -print0)
-
-	if ((moved == 0)); then
-		warning "No .deb packages found in ${source_path}"
-	else
-		info "Successfully moved ${moved} .deb packages"
-	fi
+	done <"$ARTIFACT_LIST"
+	((deb_count > 0)) || error "No .deb packages found in $SOURCE_DIR"
+	for file in "${artifacts[@]}"; do
+		mv "$file" "$REPO_DIR/pool/main/"
+	done
 }
 
-move_sources() {
-	local branch="$1"
-	local target_dir="$2"
-	local source_path="${SOURCE_DIR}/${branch}"
-	local moved=0
-
-	if [[ ! -d "${source_path}" ]]; then
-		warning "Source directory ${source_path} not found, skipping source move"
-		return 0
-	fi
-
-	info "Moving source packages from ${source_path}..."
-	mkdir -p "${target_dir}"
-	# Source package file extensions: .dsc, .tar.gz, .tar.xz, .tar.bz2, .orig.tar.*, .debian.tar.*, .changes
-	local source_exts=("*.dsc" "*.tar.gz" "*.tar.xz" "*.tar.bz2" "*.changes")
-	for pattern in "${source_exts[@]}"; do
-		while IFS= read -r -d '' file; do
-			if mv "$file" "${target_dir}/"; then
-				((moved++))
-			else
-				error "Failed to move source file $file"
-			fi
-		done < <(find "${source_path}" -name "${pattern}" -type f -print0)
-	done
-
-	if ((moved == 0)); then
-		warning "No source packages found in ${source_path}"
-	else
-		info "Successfully moved ${moved} source package files"
-	fi
-}
-
-build_repo() {
-	local branch="$1"
-
-	# Define paths
-	local deb_base="${SITE_DIR}/deb"
-	local deb_pool="${deb_base}/pool/${DEB_COMPONENTS}"
-	local deb_dists="${deb_base}/dists/${branch}"
-
-	info "Building repository for ${branch}..."
-
-	# Create repository structure and move packages
-	mkdir -p "${deb_pool}"
-	move_debs "${branch}" "${deb_pool}"
-	move_sources "${branch}" "${deb_pool}"
-
-	# Create component directories for each architecture
-	for arch in "${ARCHITECTURES[@]}"; do
-		local deb_dists_components="${deb_dists}/${DEB_COMPONENTS}/binary-${arch}"
-		mkdir -p "${deb_dists_components}"
-
-		# Generate package information for this architecture
-		pushd "${deb_base}" >/dev/null || exit 1
-		info "Scanning packages for architecture ${arch}..."
-
-		# Use -a option to filter by architecture
-		if ! dpkg-scanpackages -a "${arch}" "pool/${DEB_COMPONENTS}" >"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages" 2>/dev/null; then
-			warning "Package scanning for ${arch} failed"
-			# Create an empty Packages file so compression doesn't fail
-			touch "dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages"
-		fi
-
-		# Compress package information
-		gzip -9n >"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages.gz" <"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages"
-		bzip2 -9 >"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages.bz2" <"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages"
-		if command -v xz >/dev/null 2>&1; then
-			xz -9 >"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages.xz" <"dists/${branch}/${DEB_COMPONENTS}/binary-${arch}/Packages"
-		fi
-
-		popd >/dev/null || exit 1
-	done
-
-	# Generate source package index
-	local deb_dists_source="${deb_dists}/${DEB_COMPONENTS}/source"
-	mkdir -p "${deb_dists_source}"
-
-	pushd "${deb_base}" >/dev/null || exit 1
-	info "Scanning source packages..."
-	dpkg-scansources "pool/${DEB_COMPONENTS}" >"dists/${branch}/${DEB_COMPONENTS}/source/Sources" 2>/dev/null || true
-	gzip -9n >"dists/${branch}/${DEB_COMPONENTS}/source/Sources.gz" <"dists/${branch}/${DEB_COMPONENTS}/source/Sources"
-	bzip2 -9 >"dists/${branch}/${DEB_COMPONENTS}/source/Sources.bz2" <"dists/${branch}/${DEB_COMPONENTS}/source/Sources"
+compress_index() {
+	local index="$1"
+	gzip -9n <"$index" >"$index.gz"
+	bzip2 -9 <"$index" >"$index.bz2"
 	if command -v xz >/dev/null 2>&1; then
-		xz -9 >"dists/${branch}/${DEB_COMPONENTS}/source/Sources.xz" <"dists/${branch}/${DEB_COMPONENTS}/source/Sources"
+		xz -9 <"$index" >"$index.xz"
 	fi
-	popd >/dev/null || exit 1
+}
 
-	# Generate and sign Release file in the correct location (dists/${branch}/)
-	pushd "${deb_base}/dists/${branch}" >/dev/null || exit 1
-	info "Generating Release file..."
-	# First create the basic Release file information
+generate_indexes() {
+	local arch index
+	for arch in "${ARCHITECTURES[@]}"; do
+		index="dists/rolling/main/binary-${arch}/Packages"
+		mkdir -p "${index%/*}"
+		dpkg-scanpackages -a "$arch" pool/main >"$index" || error "Package scanning failed for $arch"
+		compress_index "$index"
+	done
+	index="dists/rolling/main/source/Sources"
+	mkdir -p "${index%/*}"
+	dpkg-scansources pool/main >"$index" || error "Source scanning failed"
+	compress_index "$index"
+}
+
+generate_release() {
+	local release_date hash_spec hash_name hash_cmd filepath file_hash file_size
+	release_date=$(date -Ru)
 	{
-		echo "Origin: VyOS"
-		echo "Label: ${REPO_OWNER}"
-		echo "Suite: ${branch}"
-		echo "Codename: ${branch}"
-		echo "Version: 1.0"
-		echo "Architectures: all amd64 arm64"
-		echo "Components: ${DEB_COMPONENTS}"
-		echo "Description: A repository for packages released by ${REPO_OWNER}"
-		echo "Date: $(date -Ru)"
+		printf 'Origin: VyOS\nLabel: %s\n' "$REPO_OWNER"
+		printf 'Suite: rolling\nCodename: rolling\nVersion: 1.0\n'
+		printf 'Architectures: all amd64 arm64\nComponents: main\n'
+		printf 'Description: A repository for packages released by %s\n' "$REPO_OWNER"
+		printf 'Date: %s\n' "$release_date"
 	} >Release
-
-	# Generate hashes for Release file
-	local hash_cmds=("MD5Sum:md5sum" "SHA1:sha1sum" "SHA256:sha256sum")
-	for hc in "${hash_cmds[@]}"; do
-		local hash_name="${hc%%:*}"
-		local hash_cmd="${hc##*:}"
-
-		echo "${hash_name}:" >>Release
-		find "${DEB_COMPONENTS}" -type f -not -path "*/\.*" | sort | while read -r filepath; do
-			if [[ "${filepath}" != "Release" && "${filepath}" != "Release.gpg" && "${filepath}" != "InRelease" ]]; then
-				file_hash=$("${hash_cmd}" "${filepath}" | awk '{print $1}')
-				# wc -c output can vary, using awk and redirecting input is the most portable way to get just the size
-				file_size=$(wc -c <"${filepath}" | awk '{print $1}')
-				echo " ${file_hash} ${file_size} ${filepath}" >>Release
-			fi
+	for hash_spec in MD5Sum:md5sum SHA1:sha1sum SHA256:sha256sum; do
+		hash_name="${hash_spec%%:*}"
+		hash_cmd="${hash_spec##*:}"
+		printf '%s:\n' "$hash_name" >>Release
+		find main -type f -not -path '*/\.*' | sort | while IFS= read -r filepath; do
+			file_hash=$("$hash_cmd" "$filepath")
+			file_size=$(wc -c <"$filepath")
+			printf ' %s %s %s\n' "${file_hash%% *}" "${file_size//[[:space:]]/}" "$filepath" >>Release
 		done
 	done
+}
 
-	# Verify Release file has hash entries
-	info "Verifying Release file contents..."
-	if ! grep -q "^MD5Sum:" "Release" || ! grep -A 1 "MD5Sum:" "Release" | grep -q "^ "; then
-		warning "No MD5Sum entries found in Release file. Repository may be empty or hash generation failed."
-		# Add debug output
-		echo "Current directory: $(pwd)"
-		echo "Files in current directory: $(ls -la)"
-		echo "Content of Release file:"
-		cat Release
+sign_release() {
+	local opts=(--batch --yes --pinentry-mode loopback)
+	if [[ -n "$GPG_KEY_ID" ]]; then
+		opts+=(--local-user "$GPG_KEY_ID")
 	fi
-
-	info "Signing Release file..."
-
-	# Build GPG signing commands
-	local gpg_common_opts=(--batch --yes --pinentry-mode loopback)
-	local gpg_sign_cmd=(gpg "${gpg_common_opts[@]}" --detach-sign --armor)
-	local gpg_clearsign_cmd=(gpg "${gpg_common_opts[@]}" --clearsign)
-
-	if [[ -n "${GPG_KEY_ID}" ]]; then
-		gpg_sign_cmd+=(--local-user "${GPG_KEY_ID}")
-		gpg_clearsign_cmd+=(--local-user "${GPG_KEY_ID}")
-	fi
-
-	if ! "${gpg_sign_cmd[@]}" --output Release.gpg <Release; then
-		error "GPG signing failed for Release.gpg"
-	fi
-
-	if ! "${gpg_clearsign_cmd[@]}" --output InRelease <Release; then
-		error "GPG signing failed for InRelease"
-	fi
-
-	popd >/dev/null || exit 1
-
-	echo "Repository built successfully for ${branch}"
+	gpg "${opts[@]}" --detach-sign --armor --output Release.gpg <Release || error "GPG signing failed for Release.gpg"
+	gpg "${opts[@]}" --clearsign --output InRelease <Release || error "GPG signing failed for InRelease"
 }
 
 cleanup() {
-	# Clean up any temporary files or failed builds
-	if [[ -d "${SITE_DIR}/packages" ]]; then
-		info "Cleaning up packages directory"
-		rm -rf "${SITE_DIR}/packages"
-	fi
+	rm -f "$ARTIFACT_LIST"
+	rm -rf "$SITE_DIR/packages"
 }
 
 main() {
-	# Set up cleanup trap
-	trap cleanup EXIT INT TERM
-
-	# Check environment variables
-	info "Starting repository build process"
-	check_env_vars
-
-	# Verify required tools
-	info "Checking required tools"
-	local required_cmds=(dpkg-scanpackages dpkg-scansources gpg gzip bzip2 find sort awk md5sum sha1sum sha256sum)
-	# Check for xz separately — it's recommended but not required
-	if ! command -v xz >/dev/null 2>&1; then
-		warning "xz not found — .xz compressed indices will not be generated"
-	fi
-	for cmd in "${required_cmds[@]}"; do
-		if ! command -v "$cmd" >/dev/null 2>&1; then
-			error "Required command '$cmd' not found"
-		fi
-	done
-
-	# Build repositories for all branches
-	info "Building repositories for supported branches"
-	for branch in "${SUPPORTED_BRANCHES[@]}"; do
-		if ! build_repo "$branch"; then
-			error "Failed to build repository for ${branch}"
-		fi
-	done
-
-	# Clean up packages directory
-	info "Final cleanup"
-	rm -rf "${SITE_DIR}/packages"
-
-	info "All repositories built successfully"
-	echo "All repositories built successfully"
+	check_inputs
+	trap cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	collect_artifacts
+	# Call functions directly: conditional calls disable errexit inside functions.
+	(
+		cd "$REPO_DIR"
+		generate_indexes
+		cd dists/rolling
+		generate_release
+		sign_release
+	)
+	printf 'Repository built successfully for rolling\n'
 }
 
 main "$@"

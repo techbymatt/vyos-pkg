@@ -94,7 +94,7 @@ def validate_manifest(value: object) -> Manifest:
         commit = require_pattern(entry["commit"], REVISION, "package commit")
         deps = entry["deps"]
         if not isinstance(deps, str):
-            raise TypeError("package deps must be a string")
+            raise ValueError("package deps must be a string")
         if any(ord(char) < 32 or ord(char) == 127 for char in deps):
             raise ValueError("deps must be single-line text without control characters")
         package = Package(
@@ -116,29 +116,13 @@ def validate_manifest(value: object) -> Manifest:
 
 
 def create_manifest(
-    decisions: Path,
+    packages: list[Package],
     repository_commit: str,
     patch_commit: str,
     image: str,
     signing_key: Path,
 ) -> Manifest:
-    """Read headerless six-column planner TSV, discarding only hit/miss."""
-    packages: list[Package] = []
-    with decisions.open(encoding="utf-8", newline="") as stream:
-        for number, line in enumerate(stream, 1):
-            fields = line.removesuffix("\n").removesuffix("\r").split("\t")
-            if len(fields) != 6:
-                raise ValueError(
-                    f"decisions line {number}: expected exactly six TSV fields"
-                )
-            group, outcome, package, arch, commit, deps = fields
-            if outcome not in ("hit", "miss"):
-                raise ValueError(f"decisions line {number}: invalid outcome")
-            packages.append(
-                Package(
-                    group=group, package=package, arch=arch, commit=commit, deps=deps
-                )
-            )
+    """Create publication inputs from source records, independent of cache state."""
     return validate_manifest(
         Manifest(
             schema_version=1,
@@ -184,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create")
-    for flag in ("decisions", "signing-key", "output"):
+    for flag in ("packages", "signing-key", "output"):
         create.add_argument("--" + flag, type=Path, required=True)
     for flag in ("repository-commit", "patch-commit", "image"):
         create.add_argument("--" + flag, required=True)
@@ -195,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "create":
             manifest = create_manifest(
-                args.decisions,
+                json.loads(
+                    args.packages.read_text(encoding="utf-8"),
+                    object_pairs_hook=unique_object,
+                ),
                 args.repository_commit,
                 args.patch_commit,
                 args.image,

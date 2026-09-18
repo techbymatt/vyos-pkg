@@ -21,7 +21,7 @@ class PublishManifestTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.decisions = self.root / "decisions.tsv"
+        self.packages = self.root / "packages.json"
         self.key = self.root / "public.asc"
         self.key.write_bytes(b"fixed public key bytes\r\n")
         self.current = self.root / "current.json"
@@ -29,20 +29,37 @@ class PublishManifestTests(unittest.TestCase):
         self.revision = "a" * 40
         self.image = "ghcr.io/example/build@sha256:" + "b" * 64
         self.rows = [
-            ["build-extra", "miss", "zeta", "arm64", "c" * 64, "bison flex"],
-            ["build", "hit", "node_exporter", "arm64", self.revision, ""],
-            ["build", "miss", "node_exporter", "amd64", self.revision, ""],
+            dict(
+                group="build-extra",
+                package="zeta",
+                arch="arm64",
+                commit="c" * 64,
+                deps="bison flex",
+            ),
+            dict(
+                group="build",
+                package="node_exporter",
+                arch="arm64",
+                commit=self.revision,
+                deps="",
+            ),
+            dict(
+                group="build",
+                package="node_exporter",
+                arch="amd64",
+                commit=self.revision,
+                deps="",
+            ),
         ]
         self.write_rows(self.rows)
 
-    def write_rows(self, rows: list[list[str]]) -> None:
-        self.decisions.write_text(
-            "".join("\t".join(row) + "\n" for row in rows), encoding="utf-8"
-        )
+    def write_rows(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.packages.write_text(json.dumps(rows), encoding="utf-8")
 
     def create(self) -> pm.Manifest:
         return pm.create_manifest(
-            self.decisions, self.revision, "d" * 64, self.image, self.key
+            self.rows, self.revision, "d" * 64, self.image, self.key
         )
 
     def cli(self, *args: str) -> tuple[int, str, str]:
@@ -77,8 +94,8 @@ class PublishManifestTests(unittest.TestCase):
         self.assertEqual(
             self.cli(
                 "create",
-                "--decisions",
-                str(self.decisions),
+                "--packages",
+                str(self.packages),
                 "--repository-commit",
                 self.revision,
                 "--patch-commit",
@@ -112,12 +129,6 @@ class PublishManifestTests(unittest.TestCase):
             manifest["signing_key_sha256"],
             hashlib.sha256(self.key.read_bytes()).hexdigest(),
         )
-
-    def test_hit_miss_independence(self) -> None:
-        expected = pm.canonical_bytes(self.create())
-        self.rows[0][1] = "hit"
-        self.write_rows(self.rows)
-        self.assertEqual(pm.canonical_bytes(self.create()), expected)
 
     def test_compare_ignores_json_format_and_package_order(self) -> None:
         manifest = self.create()
@@ -176,12 +187,12 @@ class PublishManifestTests(unittest.TestCase):
             self.create()
 
     def test_empty_package_sha(self) -> None:
-        self.rows[0][4] = ""
+        self.rows[0]["commit"] = ""
         self.write_rows(self.rows)
         with self.assertRaisesRegex(ValueError, "invalid package commit"):
             self.create()
 
-    def test_empty_decisions(self) -> None:
+    def test_empty_source_records(self) -> None:
         self.write_rows([])
         with self.assertRaisesRegex(ValueError, "packages must be a non-empty array"):
             self.create()
@@ -198,16 +209,16 @@ class PublishManifestTests(unittest.TestCase):
 
     def test_empty_patch_revision(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid patch_commit"):
-            pm.create_manifest(self.decisions, self.revision, "", self.image, self.key)
+            pm.create_manifest(self.rows, self.revision, "", self.image, self.key)
 
     def test_unpinned_image(self) -> None:
         self.image = "image:rolling"
         with self.assertRaisesRegex(ValueError, "invalid image"):
             self.create()
 
-    def test_missing_tsv_field(self) -> None:
-        self.write_rows([self.rows[0][:-1]])
-        with self.assertRaisesRegex(ValueError, "expected exactly six TSV fields"):
+    def test_missing_package_field(self) -> None:
+        del self.rows[0]["deps"]
+        with self.assertRaisesRegex(ValueError, "package must contain exactly"):
             self.create()
 
     def test_invalid_json(self) -> None:

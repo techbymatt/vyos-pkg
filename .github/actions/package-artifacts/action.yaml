@@ -1,0 +1,45 @@
+---
+name: Check and upload package artifacts
+description: Enforce output ownership before uploading fresh or restored packages.
+inputs:
+  group:
+    description: Build group.
+    required: true
+  package:
+    description: Source package name.
+    required: true
+  arch:
+    description: Producer architecture.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: paths
+      uses: ./workflow/.github/actions/package-paths
+      with:
+        group: ${{ inputs.group }}
+        package: ${{ inputs.package }}
+    - name: Check package build outputs
+      shell: bash
+      env:
+        GROUP: ${{ inputs.group }}
+        PACKAGE: ${{ inputs.package }}
+        ARCH: ${{ inputs.arch }}
+        DIRECTORY: ${{ steps.paths.outputs.directory }}
+      run: |
+        python3 workflow/scripts/package_build_policy.py check \
+          --group "$GROUP" --package "$PACKAGE" --arch "$ARCH" --directory "$DIRECTORY"
+    - name: Upload the .deb files as artifacts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        compression-level: 0
+        if-no-files-found: error
+        name: deb-${{ inputs.package }}-${{ inputs.arch }}
+        path: ${{ steps.paths.outputs.debs }}
+    - name: Upload the remaining build files as artifacts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        compression-level: 0
+        if-no-files-found: ignore
+        name: build-${{ inputs.package }}-${{ inputs.arch }}
+        path: ${{ steps.paths.outputs.sources }}
