@@ -43,6 +43,117 @@ binary: binary-indep binary-arch
 """
 
 
+# Target layout from VyOS's 0001-Add-Debian-packaging.patch. The commands use
+# dpkg directly so this fixture needs no debhelper on Debian test hosts.
+LEGACY_UDP_RULES = """#!/usr/bin/make -f
+build: build-stamp
+build-stamp:
+\ttouch $@
+clean:
+\trm -rf debian/udp-broadcast-relay debian/files build-stamp
+install: build
+\tmkdir -p debian/udp-broadcast-relay/DEBIAN
+# Build architecture-independent files here.
+binary-indep: build install
+\tdpkg-gencontrol -pudp-broadcast-relay -Pdebian/udp-broadcast-relay
+\tdpkg-deb --build --root-owner-group debian/udp-broadcast-relay ..
+# Build architecture-dependent files here.
+binary-arch: build install
+# This is an architecture independent package
+# so; we have nothing to do by default.
+binary: binary-indep
+.PHONY: build clean binary-indep binary install
+"""
+
+
+def udp_patch(rules: str = LEGACY_UDP_RULES) -> str:
+    control = (
+        "Source: udp-broadcast-relay\nSection: net\nPriority: optional\n"
+        "Maintainer: Tester <test@example.org>\nRules-Requires-Root: no\n\n"
+        "Package: udp-broadcast-relay\nArchitecture: linux-any\nDescription: Native fixture\n"
+    )
+    changelog = (
+        "udp-broadcast-relay (1.0-1) unstable; urgency=low\n\n  * Fixture.\n\n"
+        " -- Tester <test@example.org>  Thu, 17 Sep 2026 00:00:00 +0000\n"
+    )
+    patch = "From: Tester <test@example.org>\nSubject: [PATCH] Add Debian packaging\n\n"
+    for name, contents in (
+        ("control", control),
+        ("rules", rules),
+        ("changelog", changelog),
+    ):
+        mode = "100755" if name == "rules" else "100644"
+        patch += (
+            f"diff --git a/debian/{name} b/debian/{name}\nnew file mode {mode}\n"
+            f"--- /dev/null\n+++ b/debian/{name}\n"
+            f"@@ -0,0 +1,{len(contents.splitlines())} @@\n"
+            + "".join("+" + line for line in contents.splitlines(keepends=True))
+        )
+    return patch
+
+
+def write_udp_recipe(root: Path, patch: str) -> Path:
+    directory = root / "udp-broadcast-relay"
+    patches = directory / "patches/udp-broadcast-relay"
+    patches.mkdir(parents=True)
+    path = patches / "0001-Add-Debian-packaging.patch"
+    path.write_text(patch)
+    (root / "build.py").write_text("dpkg-buildpackage -uc -us -tc -F --source-option\n")
+    (directory / "package.toml").write_text(
+        'build_cmd = "dpkg-buildpackage -uc -us -tc -b -d"\n'
+    )
+    return path
+
+
+class UdpPrepareTests(unittest.TestCase):
+    def test_adapted_patch_applies_and_selects_native_packaging(self) -> None:
+        for arch, mode in (("amd64", "binary"), ("arm64", "any")):
+            with self.subTest(arch=arch), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = write_udp_recipe(root, udp_patch())
+                prepare.prepare(root, "udp-broadcast-relay", arch)
+                source = root / "source"
+                source.mkdir()
+                subprocess.run(["git", "apply", str(path)], cwd=source, check=True)
+                rules = (source / "debian/rules").read_text()
+                self.assertIn("binary-arch: build install\n\tdpkg-gencontrol", rules)
+                self.assertIn("binary-indep:\nbinary: binary-arch binary-indep", rules)
+                self.assertIn("build-arch: build-stamp", rules)
+                self.assertIn("build-indep:\n", rules)
+                self.assertIn(
+                    f"--build={mode}",
+                    (root / "udp-broadcast-relay/package.toml").read_text(),
+                )
+                # git apply must also preserve the adjacent hunks and executable bit.
+                self.assertIn(
+                    "Architecture: linux-any", (source / "debian/control").read_text()
+                )
+                self.assertTrue((source / "debian/changelog").exists())
+                self.assertTrue((source / "debian/rules").stat().st_mode & 0o111)
+
+    def test_patch_drift_fails_without_modifying_patch(self) -> None:
+        original = udp_patch()
+        variants = (
+            original.replace("Architecture: linux-any", "Architecture: all"),
+            original.replace(
+                "+Architecture: linux-any", "+Architecture: linux-any\n+Package: extra"
+            ),
+            udp_patch(
+                LEGACY_UDP_RULES.replace("binary: binary-indep", "binary: binary-arch")
+            ),
+            udp_patch(LEGACY_UDP_RULES + "build-arch: build\n"),
+            original.replace("+++ b/debian/rules", "+++ b/debian/other"),
+            original.replace("+build: build-stamp\n", ""),
+        )
+        for patch in variants:
+            with self.subTest(patch=patch), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = write_udp_recipe(root, patch)
+                with self.assertRaises(ValueError):
+                    prepare.prepare_udp_packaging(root / "udp-broadcast-relay")
+                self.assertEqual(path.read_text(), patch)
+
+
 class ExtraPrepareTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -212,6 +323,26 @@ class UpstreamRecipeTests(unittest.TestCase):
                     shutil.copy2(source / "build.py", root / "build.py")
                     shutil.copytree(source / package, root / package, symlinks=True)
                     prepare.prepare(root, package, arch)
+                    if package == "udp-broadcast-relay":
+                        # Apply just the packaging hunk to a disposable source tree;
+                        # this checks the rewritten real patch's counts and targets.
+                        unpacked = root / "unpacked"
+                        unpacked.mkdir()
+                        patch = (
+                            root
+                            / package
+                            / "patches/udp-broadcast-relay/0001-Add-Debian-packaging.patch"
+                        )
+                        subprocess.run(
+                            ["git", "apply", "--include=debian/*", str(patch)],
+                            cwd=unpacked,
+                            check=True,
+                        )
+                        rules = (unpacked / "debian/rules").read_text()
+                        self.assertIn(
+                            "binary-arch: build install\n\trm -f debian/files", rules
+                        )
+                        self.assertIn("binary: binary-arch binary-indep", rules)
                     tomllib.loads((root / package / "package.toml").read_text())
                     compile((root / "build.py").read_text(), "build.py", "exec")
 
