@@ -389,6 +389,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes ${{ matrix.deps }}
+      - name: Apply standalone package build policy
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --group build-extra --root packages \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
       - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         name: Build the package
         run: |

@@ -37,6 +37,11 @@ class TestWorkflowTests(unittest.TestCase):
                         )
                     else:
                         self.assertIn("then build_type=any", text)
+                        self.assertIn("--group build-extra --root packages", text)
+                        self.assertLess(
+                            text.index("prepare_package_build.py"),
+                            text.index("dpkg-buildpackage --build="),
+                        )
 
     def test_verification_uses_static_checks_on_unprivileged_runners(self) -> None:
         verify = job_text(WORKFLOW.read_text(), "verify")

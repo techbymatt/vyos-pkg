@@ -74,7 +74,7 @@ If the recipe overrides `build_cmd`, calls another packaging script, or uses ano
 - Skip independent-only sub-builds on arm64 before they execute. Do not build duplicate packages and then delete them before upload.
 - Preserve architecture-specific build steps and dependencies between sub-builds.
 
-Use the existing net-snmp, FRR/libyang, and strongSwan adaptations as examples. Exact command replacements intentionally fail if the expected upstream command changes; review and update the adaptation when upgrading that recipe.
+Use the existing net-snmp, FRR/libyang, and strongSwan adaptations as examples. Standalone builds call the same helper with `--group build-extra --root packages`; its `prepare_extra` function repairs package-specific Debian rules before building. For example, vyatta-biosdevname's legacy rules put its architecture-specific packaging commands under `binary-indep`, so the adaptation moves them to `binary-arch` and adds the missing build targets. Exact replacements intentionally fail if the expected upstream layout changes; review and update the adaptation when upgrading that recipe.
 
 ### 4. Validate and enable publication
 

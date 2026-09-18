@@ -8,6 +8,7 @@ Custom arch-only builders (including the kernel) keep their own build targets.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -79,14 +80,75 @@ def prepare(root: Path, package: str, arch: str) -> None:
         )
 
 
+def prepare_extra(root: Path, package: str) -> None:
+    """Repair the legacy binary target split in the standalone source checkout.
+
+    vyatta-biosdevname 7fbb031 declares one Architecture: any package but puts
+    dh_builddeb under binary-indep. Keep the packaging commands intact, moving
+    their ownership to binary-arch. Validate all anchors before writing anything.
+    """
+    if package != "vyatta-biosdevname":
+        return
+    debian = root / package / "debian"
+    control = (debian / "control").read_text()
+    if re.findall(r"^Package:\s*(\S+)\s*$", control, re.MULTILINE) != [
+        package
+    ] or re.findall(r"^Architecture:\s*(\S+)\s*$", control, re.MULTILINE) != ["any"]:
+        raise ValueError(
+            f"{debian / 'control'}: expected one Architecture: any package"
+        )
+    path = debian / "rules"
+    text = path.read_text()
+    replacements = (
+        (
+            "build: build-stamp\n",
+            "build: build-arch build-indep\n\nbuild-arch: build-stamp\n\nbuild-indep:\n",
+        ),
+        (
+            "# Build architecture-independent files here.\nbinary-indep: build install\n",
+            "# Build architecture-dependent files here.\nbinary-arch: build install\n",
+        ),
+        (
+            (
+                "# Build architecture-dependent files here.\n"
+                "binary-arch: build install\n"
+                "# This is an architecture independent package\n"
+                "# so; we have nothing to do by default.\n"
+            ),
+            "# No architecture-independent packages are produced.\nbinary-indep:\n",
+        ),
+        (
+            ".PHONY: build clean binary-indep binary-arch binary install",
+            ".PHONY: build build-arch build-indep clean binary-indep binary-arch binary install",
+        ),
+    )
+    # Unexpected extra targets must not silently combine with the added rules.
+    for target in ("build", "build-arch", "build-indep", "binary-arch", "binary-indep"):
+        expected = 0 if target in ("build-arch", "build-indep") else 1
+        if len(re.findall(rf"^{target}\s*:", text, re.MULTILINE)) != expected:
+            raise ValueError(f"{path}: unexpected {target} target layout")
+    for old, _ in replacements:
+        if text.count(old) != 1:
+            raise ValueError(
+                f"{path}: expected exactly one audited rules block {old!r}"
+            )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    path.write_text(text)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--package", required=True)
     parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
+    parser.add_argument("--group", choices=("build", "build-extra"), default="build")
     args = parser.parse_args()
     try:
-        prepare(args.root, args.package, args.arch)
+        if args.group == "build-extra":
+            prepare_extra(args.root, args.package)
+        else:
+            prepare(args.root, args.package, args.arch)
     except (OSError, ValueError) as error:
         print(f"prepare_package_build: {error}", file=sys.stderr)
         return 1
