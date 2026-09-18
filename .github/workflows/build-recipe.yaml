@@ -1,0 +1,112 @@
+---
+name: Build recipe packages
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      build-ref:
+        required: true
+        type: string
+      cache:
+        default: false
+        type: boolean
+      max-parallel:
+        default: 4
+        type: number
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+permissions:
+  contents: read
+  packages: read
+jobs:
+  build:
+    runs-on: ${{ matrix.runner_label }}
+    container:
+      env:
+        TZ: Australia/Brisbane
+      image: ${{ inputs.image }}
+      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+      max-parallel: ${{ inputs.max-parallel }}
+    timeout-minutes: 150
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          owner: techbymatt
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Checkout the tbm-vyos-patch repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.build-ref }}
+          fetch-depth: 0
+          repository: techbymatt/tbm-vyos-patch
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Checkout build tools and actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: |
+            scripts
+            .github/actions
+      - name: Patch vyos-build
+        run: |
+          cp --verbose ../patches/vyos-build/*.patch .
+          git apply --3way --verbose ./*.patch
+        working-directory: vyos-build
+      - name: Apply package build policy
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --root vyos-build/scripts/package-build \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
+      - name: Setup golang
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: false
+      - if: ${{ matrix.arch == 'amd64' && matrix.package == 'shim-signed' }}
+        name: Prefer VyOS shim dependencies
+        run: |
+          printf '%s\n' \
+            'Package: shim-unsigned shim-helpers-amd64-signed shim-helpers-amd64-signed-template' \
+            'Pin: origin "packages.vyos.net"' \
+            'Pin-Priority: 1001' \
+            | sudo tee /etc/apt/preferences.d/vyos-shim >/dev/null
+      - id: paths
+        uses: ./workflow/.github/actions/package-paths
+        with:
+          group: build
+          package: ${{ matrix.package }}
+      - id: cache
+        name: Cache build
+        if: ${{ inputs.cache }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ matrix.cache_key }}
+          path: ${{ steps.paths.outputs.cache }}
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        name: Build the package
+        run: python3 build.py
+        working-directory: vyos-build/scripts/package-build/${{ matrix.package }}
+      - name: Check and upload package artifacts
+        uses: ./workflow/.github/actions/package-artifacts
+        with:
+          group: build
+          package: ${{ matrix.package }}
+          arch: ${{ matrix.arch }}

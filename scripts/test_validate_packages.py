@@ -312,7 +312,9 @@ class ValidatePackagesTests(unittest.TestCase):
                 for empty in (False, True):
                     if empty:
                         (root / f"deb-linux-{arch}").mkdir()
-                    with self.assertRaisesRegex(ValueError, f"group: {arch}"):
+                    with self.assertRaisesRegex(
+                        ValueError, f"(group: {arch}|empty artifact directory)"
+                    ):
                         vp.validate_artifacts(root)
         with self.assertRaisesRegex(ValueError, "empty or missing"):
             vp.validate_artifacts(self.root)
@@ -335,12 +337,64 @@ class ValidatePackagesTests(unittest.TestCase):
 
     def test_artifacts_missing_root_cli_error(self) -> None:
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(vp.main(["--artifacts", str(self.root / "absent")]), 1)
+            self.assertEqual(
+                vp.main(
+                    [
+                        "--artifacts",
+                        str(self.root / "absent"),
+                        "--expected-arches",
+                        '["amd64","arm64"]',
+                    ]
+                ),
+                1,
+            )
+
+    def test_single_expected_architecture(self) -> None:
+        self.artifact_package("deb-sample-amd64")
+        self.metadata["Architecture"] = "all"
+        self.assertEqual(
+            vp.main(["--artifacts", str(self.root), "--expected-arches", '["amd64"]']),
+            0,
+        )
+
+    def test_single_arm64_expected_architecture(self) -> None:
+        self.artifact_package("deb-sample-arm64")
+        self.metadata["Architecture"] = "arm64"
+        vp.validate_artifacts(self.root, ["arm64"])
+
+    def test_unexpected_architecture_group(self) -> None:
+        self.artifact_package("deb-sample-arm64")
+        with self.assertRaisesRegex(ValueError, "unexpected artifact architecture"):
+            vp.validate_artifacts(self.root, ["amd64"])
+
+    def test_invalid_expected_architecture_sets(self) -> None:
+        for arches in ([], ["all"], ["amd64", "amd64"], "amd64", {}, [None]):
+            with (
+                self.subTest(arches=arches),
+                self.assertRaisesRegex(ValueError, "expected architectures"),
+            ):
+                vp.validate_artifacts(self.root, arches)
+
+    def test_artifact_duplicates_checked_across_sources(self) -> None:
+        self.artifact_package("deb-recipe-amd64")
+        duplicate = self.artifact_package("deb-standalone-amd64")
+        vp.validate_artifacts(self.root, ["amd64"])
+        duplicate.write_bytes(b"different package bytes")
+        with self.assertRaisesRegex(ValueError, "differing SHA256"):
+            vp.validate_artifacts(self.root, ["amd64"])
+
+    def test_empty_artifact_rejected_even_with_other_outputs(self) -> None:
+        self.artifact_package("deb-sample-amd64")
+        (self.root / "deb-empty-amd64").mkdir()
+        with self.assertRaisesRegex(ValueError, "empty artifact directory"):
+            vp.validate_artifacts(self.root, ["amd64"])
 
     def test_cli_rejects_mixed_modes(self) -> None:
         for arguments in (
             ["--artifacts", str(self.root), "--arch", "amd64"],
             ["--artifacts", str(self.root), str(self.package)],
+            ["--artifacts", str(self.root)],
+            ["--arch", "amd64", str(self.package), "--expected-arches", '["amd64"]'],
             [],
         ):
             with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):

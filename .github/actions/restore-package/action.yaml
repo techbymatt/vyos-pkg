@@ -16,80 +16,38 @@ runs:
         printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
         chmod +x "$shim/zstd"
         echo "$shim" >>"$GITHUB_PATH"
+    - id: paths
+      uses: ./workflow/.github/actions/package-paths
+      with:
+        group: ${{ fromJSON(inputs.entry).group }}
+        package: ${{ fromJSON(inputs.entry).package }}
     - name: Restore the cached build
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         fail-on-cache-miss: true
         key: ${{ fromJSON(inputs.entry).cache_key }}
-        path: |
-          ${{ fromJSON(inputs.entry).group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', fromJSON(inputs.entry).package) || 'packages/*.deb' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
-    - name: Check restored package build outputs
-      shell: bash
-      env:
-        PACKAGE: ${{ fromJSON(inputs.entry).package }}
-        ARCH: ${{ fromJSON(inputs.entry).arch }}
-        GROUP: ${{ fromJSON(inputs.entry).group }}
-      run: |
-        directory=packages
-        if [[ "$GROUP" == build ]]; then
-          directory="vyos-build/scripts/package-build/$PACKAGE"
-        fi
-        python3 scripts/package_build_policy.py check \
-          --group "$GROUP" --package "$PACKAGE" --arch "$ARCH" --directory "$directory"
-    - name: Upload the .deb files as artifacts
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        path: ${{ steps.paths.outputs.cache }}
+    - name: Check and upload package artifacts
+      uses: ./workflow/.github/actions/package-artifacts
       with:
-        compression-level: 0
-        if-no-files-found: error
-        name: deb-${{ fromJSON(inputs.entry).package }}-${{ fromJSON(inputs.entry).arch }}
-        path: ${{ fromJSON(inputs.entry).group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', fromJSON(inputs.entry).package) || 'packages/*.deb' }}
-    - name: Upload the remaining build files as artifacts
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        compression-level: 0
-        if-no-files-found: ignore
-        name: build-${{ fromJSON(inputs.entry).package }}-${{ fromJSON(inputs.entry).arch }}
-        path: |
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
-          ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
+        group: ${{ fromJSON(inputs.entry).group }}
+        package: ${{ fromJSON(inputs.entry).package }}
+        arch: ${{ fromJSON(inputs.entry).arch }}
     - name: Clean up restored package files
       if: ${{ always() }}
       shell: bash
       env:
-        PACKAGE: ${{ fromJSON(inputs.entry).package }}
-        GROUP: ${{ fromJSON(inputs.entry).group }}
+        CACHE_PATHS: ${{ steps.paths.outputs.cache }}
       run: |
-        set -euo pipefail
-        shopt -s globstar nullglob dotglob
-        # Match the cache/upload paths, including shared metadata and extra packages.
-        # Remove files only: source directories may belong to the caller's checkout.
-        if [[ "$GROUP" == 'build' ]]; then
-          files=(
-            vyos-build/scripts/package-build/"$PACKAGE"/*.deb
-            vyos-build/scripts/package-build/**/*.buildinfo
-            vyos-build/scripts/package-build/**/*.changes
-            vyos-build/scripts/package-build/**/*.dsc
-            vyos-build/scripts/package-build/**/*debian.tar.*
-            vyos-build/scripts/package-build/**/*orig.tar.*
-          )
-        else
-          files=(
-            packages/*.deb
-            packages/*.buildinfo
-            packages/*.changes
-            packages/*.dsc
-            packages/*debian.tar.*
-            packages/*orig.tar.*
-          )
-        fi
-        if ((${#files[@]} > 0)); then
-          rm -f -- "${files[@]}"
-        fi
+        python3 - <<'PY'
+        import glob
+        import os
+        from pathlib import Path
+
+        # Remove files only; source directories can belong to the caller.
+        for pattern in os.environ['CACHE_PATHS'].splitlines():
+            for match in glob.glob(pattern, recursive=True):
+                path = Path(match)
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+        PY
