@@ -29,6 +29,8 @@ def prepare(root: Path, package: str, arch: str) -> None:
         f"dpkg-buildpackage -uc -us -tc --build={mode} --source-option",
     )
     recipe = root / package / "package.toml"
+    if package == "udp-broadcast-relay":
+        prepare_udp_packaging(root / package)
     binary = "binary" if arch == "amd64" else "any"
     # Only known command fragments in explicitly audited recipes are changed.
     commands = {
@@ -78,6 +80,67 @@ def prepare(root: Path, package: str, arch: str) -> None:
             "dpkg-source -x apkg-source/*.dsc ../libyang-build && "
             f"(cd ../libyang-build && dpkg-buildpackage --build={binary} -us -uc -tc)",
         )
+
+
+def prepare_udp_packaging(directory: Path) -> None:
+    """Repair the rules in the patch applied later by the recipe's git am loop."""
+    path = directory / "patches/udp-broadcast-relay/0001-Add-Debian-packaging.patch"
+    text = path.read_text()
+    # This is an added-file patch, not a checkout of the package source yet.
+    if re.findall(r"^\+Package: (.+)$", text, re.MULTILINE) != [
+        "udp-broadcast-relay"
+    ] or re.findall(r"^\+Architecture: (.+)$", text, re.MULTILINE) != ["linux-any"]:
+        raise ValueError(f"{path}: expected one Architecture: linux-any package")
+    pattern = r"(\+\+\+ b/debian/rules\n)@@ -0,0 \+1,(\d+) @@\n((?:\+[^\n]*\n)+)"
+    matches = list(re.finditer(pattern, text))
+    if len(matches) != 1:
+        raise ValueError(f"{path}: expected one added debian/rules hunk")
+    match = matches[0]
+    lines = match[3].splitlines(keepends=True)
+    if len(lines) != int(match[2]):
+        raise ValueError(f"{path}: unexpected debian/rules hunk length")
+    rules = "".join(line[1:] for line in lines)
+    for target in (
+        "build",
+        "build-arch",
+        "build-indep",
+        "binary",
+        "binary-arch",
+        "binary-indep",
+    ):
+        expected = 0 if target in ("build-arch", "build-indep") else 1
+        if len(re.findall(rf"^{target}\s*:", rules, re.MULTILINE)) != expected:
+            raise ValueError(f"{path}: unexpected {target} target layout")
+    replacements = (
+        (
+            "build: build-stamp\n",
+            "build: build-arch build-indep\n\nbuild-arch: build-stamp\n\nbuild-indep:\n",
+        ),
+        (
+            "# Build architecture-independent files here.\nbinary-indep: build install\n",
+            "# Build architecture-dependent files here.\nbinary-arch: build install\n",
+        ),
+        (
+            "# Build architecture-dependent files here.\nbinary-arch: build install\n"
+            "# This is an architecture independent package\n# so; we have nothing to do by default.\n",
+            "# No architecture-independent packages are produced.\nbinary-indep:\n",
+        ),
+        ("binary: binary-indep\n", "binary: binary-arch binary-indep\n"),
+        (
+            ".PHONY: build clean binary-indep binary install\n",
+            ".PHONY: build build-arch build-indep clean binary-arch binary-indep binary install\n",
+        ),
+    )
+    for old, _ in replacements:
+        if rules.count(old) != 1:
+            raise ValueError(
+                f"{path}: expected exactly one audited rules block {old!r}"
+            )
+    for old, new in replacements:
+        rules = rules.replace(old, new)
+    added = "".join("+" + line for line in rules.splitlines(keepends=True))
+    hunk = f"{match[1]}@@ -0,0 +1,{len(rules.splitlines())} @@\n{added}"
+    path.write_text(text[: match.start()] + hunk + text[match.end() :])
 
 
 def prepare_extra(root: Path, package: str) -> None:

@@ -9,11 +9,19 @@ from pathlib import Path
 try:
     from . import package_build_policy as policy
     from . import prepare_package_build as prepare
-    from .test_prepare_package_build import LEGACY_BIOSDEVNAME_RULES
+    from .test_prepare_package_build import (
+        LEGACY_BIOSDEVNAME_RULES,
+        udp_patch,
+        write_udp_recipe,
+    )
 except ImportError:
     import package_build_policy as policy
     import prepare_package_build as prepare
-    from test_prepare_package_build import LEGACY_BIOSDEVNAME_RULES
+    from test_prepare_package_build import (
+        LEGACY_BIOSDEVNAME_RULES,
+        udp_patch,
+        write_udp_recipe,
+    )
 
 
 @unittest.skipUnless(
@@ -21,6 +29,40 @@ except ImportError:
     "requires Debian dpkg-dev and make",
 )
 class DebianBuildModeTests(unittest.TestCase):
+    def test_udp_patch_repairs_native_binary_build(self) -> None:
+        native = subprocess.check_output(
+            ["dpkg", "--print-architecture"], text=True
+        ).strip()
+        for arch, mode in (("arm64", "any"), ("amd64", "binary")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                patch = write_udp_recipe(root, udp_patch())
+                source = root / "source"
+                source.mkdir()
+                subprocess.run(["git", "apply", str(patch)], cwd=source, check=True)
+                command = ["dpkg-buildpackage", f"--build={mode}", "-d", "-us", "-uc"]
+                if mode == "any":
+                    broken = subprocess.run(
+                        command, cwd=source, text=True, capture_output=True
+                    )
+                    self.assertNotEqual(broken.returncode, 0)
+                    self.assertIn("no binary artifacts found", broken.stderr)
+                    self.assertEqual(list(root.glob("*.deb")), [])
+                shutil.rmtree(source)
+                source.mkdir()
+                prepare.prepare(root, "udp-broadcast-relay", arch)
+                subprocess.run(["git", "apply", str(patch)], cwd=source, check=True)
+                fixed = subprocess.run(
+                    command, cwd=source, text=True, capture_output=True
+                )
+                self.assertEqual(fixed.returncode, 0, fixed.stdout + fixed.stderr)
+                self.assertNotIn("must be updated to support", fixed.stderr)
+                self.assertEqual(
+                    [p.name for p in root.glob("*.deb")],
+                    [f"udp-broadcast-relay_1.0-1_{native}.deb"],
+                )
+                policy.check_outputs("build", "udp-broadcast-relay", native, root)
+
     def test_legacy_arch_package_requires_repaired_binary_target(self) -> None:
         native = subprocess.check_output(
             ["dpkg", "--print-architecture"], text=True
