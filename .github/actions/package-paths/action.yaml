@@ -1,0 +1,57 @@
+---
+name: Package artifact paths
+description: Shared relative path contract for package caching, uploads and cleanup.
+inputs:
+  group:
+    description: Build group (build or build-extra).
+    required: true
+  package:
+    description: Source package name.
+    required: true
+outputs:
+  directory:
+    description: Directory containing binary outputs.
+    value: ${{ steps.paths.outputs.directory }}
+  debs:
+    description: Binary artifact glob.
+    value: ${{ steps.paths.outputs.debs }}
+  sources:
+    description: Source and build metadata globs.
+    value: ${{ steps.paths.outputs.sources }}
+  cache:
+    description: Ordered cache path contract, also used for cleanup.
+    value: ${{ steps.paths.outputs.cache }}
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        GROUP: ${{ inputs.group }}
+        PACKAGE: ${{ inputs.package }}
+      run: |
+        set -euo pipefail
+        [[ "$PACKAGE" =~ ^[a-z0-9][a-z0-9+._-]*$ ]]
+        case "$GROUP" in
+          build)
+            directory="vyos-build/scripts/package-build/$PACKAGE"
+            metadata='vyos-build/scripts/package-build/**'
+            ;;
+          build-extra)
+            directory=packages
+            metadata=packages
+            ;;
+          *) exit 1 ;;
+        esac
+        sources="$(printf '%s\n' "$metadata/*.buildinfo" "$metadata/*.changes" "$metadata/*.dsc" "$metadata/*debian.tar.*" "$metadata/*orig.tar.*")"
+        {
+          echo "directory=$directory"
+          echo "debs=$directory/*.deb"
+          echo 'sources<<PATHS'
+          printf '%s\n' "$sources"
+          echo PATHS
+          echo 'cache<<PATHS'
+          echo "$directory/*.deb"
+          printf '%s\n' "$sources"
+          echo PATHS
+        } >> "$GITHUB_OUTPUT"

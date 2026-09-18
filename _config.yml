@@ -12,6 +12,8 @@ theme: minima
 plugins:
   - jekyll-feed
 exclude:
+  - packages/
+  - scripts/
   - tools/
   - doc/
   - renovate.json

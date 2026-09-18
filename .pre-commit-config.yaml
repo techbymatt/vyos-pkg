@@ -1,14 +1,22 @@
 repos:
-- repo: https://github.com/gitleaks/gitleaks
-  rev: v8.30.1
-  hooks:
-  - id: gitleaks
-- repo: https://github.com/jumanjihouse/pre-commit-hooks
-  rev: 3.0.0
-  hooks:
-  - id: shellcheck
-- repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v6.0.0
-  hooks:
-  - id: end-of-file-fixer
-  - id: trailing-whitespace
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
+    hooks:
+      - id: shellcheck
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: local
+    hooks:
+      - id: publish-tools-tests
+        name: Publish workflow tool tests
+        entry: python3 -m unittest discover -s scripts
+        language: system
+        pass_filenames: false
+        files: ^(scripts/|\.github/(workflows/|actions/))
