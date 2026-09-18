@@ -22,7 +22,13 @@ IMAGE = "ghcr.io/example/build@sha256:" + "c" * 64
 
 
 def record(name="frr", arch="amd64", group="build", deps=""):
-    return dict(group=group, package=name, arch=arch, commit=REVISION, deps=deps)
+    return {
+        "group": group,
+        "package": name,
+        "arch": arch,
+        "commit": REVISION,
+        "deps": deps,
+    }
 
 
 def cache_key(row, run="122-1"):
@@ -113,14 +119,14 @@ class PublishPlannerTests(unittest.TestCase):
         self.assertEqual(
             result["build-matrix"]["include"],
             [
-                dict(
-                    group="build",
-                    package="frr",
-                    arch="amd64",
-                    commit=REVISION,
-                    runner_label="ubuntu-24.04",
-                    cache_key=cache_key(rows[0], "123-1"),
-                )
+                {
+                    "group": "build",
+                    "package": "frr",
+                    "arch": "amd64",
+                    "commit": REVISION,
+                    "runner_label": "ubuntu-24.04",
+                    "cache_key": cache_key(rows[0], "123-1"),
+                }
             ],
         )
         self.assertEqual(
@@ -135,26 +141,26 @@ class PublishPlannerTests(unittest.TestCase):
     def test_newest_visible_cache_and_exact_prefix(self) -> None:
         row = record()
         caches = [
-            dict(
-                key=cache_key(row, "old"),
-                ref="refs/heads/topic",
-                created_at="2026-01-01",
-            ),
-            dict(
-                key=cache_key(row, "hidden"),
-                ref="refs/heads/other",
-                created_at="2026-01-04",
-            ),
-            dict(
-                key=cache_key(row, "new"),
-                ref="refs/heads/main",
-                created_at="2026-01-03",
-            ),
-            dict(
-                key="not-" + cache_key(row),
-                ref="refs/heads/main",
-                created_at="2026-01-05",
-            ),
+            {
+                "key": cache_key(row, "old"),
+                "ref": "refs/heads/topic",
+                "created_at": "2026-01-01",
+            },
+            {
+                "key": cache_key(row, "hidden"),
+                "ref": "refs/heads/other",
+                "created_at": "2026-01-04",
+            },
+            {
+                "key": cache_key(row, "new"),
+                "ref": "refs/heads/main",
+                "created_at": "2026-01-03",
+            },
+            {
+                "key": "not-" + cache_key(row),
+                "ref": "refs/heads/main",
+                "created_at": "2026-01-05",
+            },
         ]
         keys = planner.visible_cache_keys(caches, "refs/heads/topic", "main")
         result = planner.plan_publish([row], keys, NAMESPACE, "123-1")
@@ -408,13 +414,25 @@ class PublishBoundaryTests(unittest.TestCase):
         pages = [
             {
                 "actions_caches": [
-                    dict(key="older", ref="refs/heads/topic", created_at="2026-01-01")
+                    {
+                        "key": "older",
+                        "ref": "refs/heads/topic",
+                        "created_at": "2026-01-01",
+                    }
                 ]
             },
             {
                 "actions_caches": [
-                    dict(key="newer", ref="refs/heads/main", created_at="2026-01-02"),
-                    dict(key="hidden", ref="refs/heads/other", created_at="2026-01-03"),
+                    {
+                        "key": "newer",
+                        "ref": "refs/heads/main",
+                        "created_at": "2026-01-02",
+                    },
+                    {
+                        "key": "hidden",
+                        "ref": "refs/heads/other",
+                        "created_at": "2026-01-03",
+                    },
                 ]
             },
         ]

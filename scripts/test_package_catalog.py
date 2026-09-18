@@ -16,15 +16,50 @@ class CatalogTests(unittest.TestCase):
         sources = catalog.load_catalog()
         self.assertEqual(
             [entry["name"] for entry in sources["build"]],
-            """
-            amazon-cloudwatch-agent amazon-ssm-agent aws-gwlbtun bash-completion
-            blackbox_exporter ddclient dropbear ethtool frr frr_exporter hostap
-            hsflowd iproute2 isc-dhcp isc-kea keepalived libhtp libnss-mapuser
-            libpam-radius-auth linux-kernel ndppd net-snmp netfilter node_exporter
-            openssl openvpn openvpn-otp owamp podman pyhumps radvd shim-signed squid
-            strongswan tacacs telegraf udp-broadcast-relay vyos-1x waagent wide-dhcpv6
-            xen-guest-agent zerotier-one
-        """.split(),
+            [
+                "amazon-cloudwatch-agent",
+                "amazon-ssm-agent",
+                "aws-gwlbtun",
+                "bash-completion",
+                "blackbox_exporter",
+                "ddclient",
+                "dropbear",
+                "ethtool",
+                "frr",
+                "frr_exporter",
+                "hostap",
+                "hsflowd",
+                "iproute2",
+                "isc-dhcp",
+                "isc-kea",
+                "keepalived",
+                "libhtp",
+                "libnss-mapuser",
+                "libpam-radius-auth",
+                "linux-kernel",
+                "ndppd",
+                "net-snmp",
+                "netfilter",
+                "node_exporter",
+                "openssl",
+                "openvpn",
+                "openvpn-otp",
+                "owamp",
+                "podman",
+                "pyhumps",
+                "radvd",
+                "shim-signed",
+                "squid",
+                "strongswan",
+                "tacacs",
+                "telegraf",
+                "udp-broadcast-relay",
+                "vyos-1x",
+                "waagent",
+                "wide-dhcpv6",
+                "xen-guest-agent",
+                "zerotier-one",
+            ],
         )
         self.assertEqual(
             {

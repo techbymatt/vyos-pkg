@@ -19,7 +19,11 @@ from urllib.parse import quote
 try:
     from . import (
         cache_namespace,
+    )
+    from . import (
         package_catalog as catalog,
+    )
+    from . import (
         publish_manifest as manifest,
     )
 except ImportError:
