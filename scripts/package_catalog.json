@@ -1,51 +1,152 @@
 {
   "build": [
-    { "name": "amazon-cloudwatch-agent" },
-    { "name": "amazon-ssm-agent" },
-    { "name": "aws-gwlbtun" },
-    { "name": "bash-completion", "architecture": "independent_only" },
-    { "name": "blackbox_exporter" },
-    { "name": "ddclient", "architecture": "independent_only" },
-    { "name": "dropbear" },
-    { "name": "ethtool" },
-    { "name": "frr" },
-    { "name": "frr_exporter" },
-    { "name": "hostap" },
-    { "name": "hsflowd" },
-    { "name": "iproute2" },
-    { "name": "isc-dhcp" },
-    { "name": "isc-kea" },
-    { "name": "keepalived" },
-    { "name": "libhtp" },
-    { "name": "libnss-mapuser" },
-    { "name": "libpam-radius-auth" },
-    { "name": "linux-kernel" },
-    { "name": "ndppd" },
-    { "name": "net-snmp" },
-    { "name": "netfilter" },
-    { "name": "node_exporter" },
-    { "name": "openssl" },
-    { "name": "openvpn" },
-    { "name": "openvpn-otp" },
-    { "name": "owamp" },
-    { "name": "podman" },
-    { "name": "pyhumps", "architecture": "independent_only" },
-    { "name": "radvd" },
-    { "name": "shim-signed", "architecture": "amd64_only" },
-    { "name": "squid" },
-    { "name": "strongswan" },
-    { "name": "tacacs" },
-    { "name": "telegraf" },
-    { "name": "udp-broadcast-relay" },
-    { "name": "vyos-1x" },
-    { "name": "waagent", "architecture": "independent_only" },
-    { "name": "wide-dhcpv6" },
-    { "name": "xen-guest-agent" },
-    { "name": "zerotier-one" }
+    {
+      "name": "amazon-cloudwatch-agent"
+    },
+    {
+      "name": "amazon-ssm-agent"
+    },
+    {
+      "name": "aws-gwlbtun"
+    },
+    {
+      "name": "bash-completion",
+      "architecture": "independent_only"
+    },
+    {
+      "name": "blackbox_exporter"
+    },
+    {
+      "name": "ddclient",
+      "architecture": "independent_only"
+    },
+    {
+      "name": "dropbear"
+    },
+    {
+      "name": "ethtool"
+    },
+    {
+      "name": "frr"
+    },
+    {
+      "name": "frr_exporter"
+    },
+    {
+      "name": "hostap"
+    },
+    {
+      "name": "hsflowd"
+    },
+    {
+      "name": "iproute2"
+    },
+    {
+      "name": "isc-dhcp"
+    },
+    {
+      "name": "isc-kea"
+    },
+    {
+      "name": "keepalived"
+    },
+    {
+      "name": "libhtp"
+    },
+    {
+      "name": "libnss-mapuser"
+    },
+    {
+      "name": "libpam-radius-auth"
+    },
+    {
+      "name": "linux-kernel"
+    },
+    {
+      "name": "ndppd"
+    },
+    {
+      "name": "net-snmp"
+    },
+    {
+      "name": "netfilter"
+    },
+    {
+      "name": "node_exporter"
+    },
+    {
+      "name": "openssl"
+    },
+    {
+      "name": "openvpn"
+    },
+    {
+      "name": "openvpn-otp"
+    },
+    {
+      "name": "owamp"
+    },
+    {
+      "name": "podman"
+    },
+    {
+      "name": "pyhumps",
+      "architecture": "independent_only"
+    },
+    {
+      "name": "radvd"
+    },
+    {
+      "name": "shim-signed",
+      "architecture": "amd64_only"
+    },
+    {
+      "name": "squid"
+    },
+    {
+      "name": "strongswan"
+    },
+    {
+      "name": "tacacs"
+    },
+    {
+      "name": "telegraf"
+    },
+    {
+      "name": "udp-broadcast-relay"
+    },
+    {
+      "name": "vyos-1x"
+    },
+    {
+      "name": "waagent",
+      "architecture": "independent_only"
+    },
+    {
+      "name": "wide-dhcpv6"
+    },
+    {
+      "name": "xen-guest-agent"
+    },
+    {
+      "name": "zerotier-one"
+    }
   ],
   "build-extra": [
-    { "name": "hvinfo", "deps": ["gnat", "gprbuild"] },
-    { "name": "ipaddrcheck", "deps": ["check", "libcidr-dev"] },
+    {
+      "name": "hvinfo",
+      "deps": [
+        "gnat",
+        "gprbuild"
+      ]
+    },
+    {
+      "name": "ipaddrcheck",
+      "deps": [
+        "check",
+        "libcidr-dev"
+      ]
+    },
     {
       "name": "libnss-tacplus",
       "deps": [
@@ -65,15 +166,48 @@
         "libtacplus-map-dev"
       ]
     },
-    { "name": "libtacplus-map", "deps": ["autoconf-archive", "libaudit-dev"] },
-    { "name": "live-boot", "architecture": "independent_only" },
-    { "name": "vyatta-bash", "deps": ["bison", "libncurses5-dev"] },
-    { "name": "vyatta-biosdevname", "deps": ["libpci-dev"] },
+    {
+      "name": "libtacplus-map",
+      "deps": [
+        "autoconf-archive",
+        "libaudit-dev"
+      ]
+    },
+    {
+      "name": "live-boot",
+      "architecture": "independent_only"
+    },
+    {
+      "name": "vyatta-bash",
+      "deps": [
+        "bison",
+        "libncurses5-dev"
+      ]
+    },
+    {
+      "name": "vyatta-biosdevname",
+      "deps": [
+        "libpci-dev"
+      ]
+    },
     {
       "name": "vyatta-cfg",
-      "deps": ["bison", "flex", "libboost-filesystem-dev", "libglib2.0-dev"]
+      "deps": [
+        "bison",
+        "flex",
+        "libboost-filesystem-dev",
+        "libglib2.0-dev"
+      ]
     },
-    { "name": "vyos-http-api-tools", "deps": ["dh-virtualenv"] },
-    { "name": "vyos-live-build", "architecture": "independent_only" }
+    {
+      "name": "vyos-http-api-tools",
+      "deps": [
+        "dh-virtualenv"
+      ]
+    },
+    {
+      "name": "vyos-live-build",
+      "architecture": "independent_only"
+    }
   ]
 }

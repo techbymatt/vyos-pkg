@@ -43,7 +43,7 @@ class DebianBuildModeTests(unittest.TestCase):
                 command = ["dpkg-buildpackage", f"--build={mode}", "-d", "-us", "-uc"]
                 if mode == "any":
                     broken = subprocess.run(
-                        command, cwd=source, text=True, capture_output=True
+                        command, check=False, cwd=source, text=True, capture_output=True
                     )
                     self.assertNotEqual(broken.returncode, 0)
                     self.assertIn("no binary artifacts found", broken.stderr)
@@ -53,7 +53,7 @@ class DebianBuildModeTests(unittest.TestCase):
                 prepare.prepare(root, "udp-broadcast-relay", arch)
                 subprocess.run(["git", "apply", str(patch)], cwd=source, check=True)
                 fixed = subprocess.run(
-                    command, cwd=source, text=True, capture_output=True
+                    command, check=False, cwd=source, text=True, capture_output=True
                 )
                 self.assertEqual(fixed.returncode, 0, fixed.stdout + fixed.stderr)
                 self.assertNotIn("must be updated to support", fixed.stderr)

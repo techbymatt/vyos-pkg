@@ -6,13 +6,12 @@ import hashlib
 import json
 import lzma
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("build_repo.sh").resolve()
 FAKE_TOOL = r"""
@@ -120,6 +119,7 @@ class BuildRepoTests(unittest.TestCase):
     def run_build(self, **env):
         return subprocess.run(
             [str(SCRIPT)],
+            check=False,
             cwd=self.root,
             env={**self.env, **env},
             capture_output=True,

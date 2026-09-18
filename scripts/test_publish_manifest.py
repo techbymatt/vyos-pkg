@@ -29,27 +29,27 @@ class PublishManifestTests(unittest.TestCase):
         self.revision = "a" * 40
         self.image = "ghcr.io/example/build@sha256:" + "b" * 64
         self.rows = [
-            dict(
-                group="build-extra",
-                package="zeta",
-                arch="arm64",
-                commit="c" * 64,
-                deps="bison flex",
-            ),
-            dict(
-                group="build",
-                package="node_exporter",
-                arch="arm64",
-                commit=self.revision,
-                deps="",
-            ),
-            dict(
-                group="build",
-                package="node_exporter",
-                arch="amd64",
-                commit=self.revision,
-                deps="",
-            ),
+            {
+                "group": "build-extra",
+                "package": "zeta",
+                "arch": "arm64",
+                "commit": "c" * 64,
+                "deps": "bison flex",
+            },
+            {
+                "group": "build",
+                "package": "node_exporter",
+                "arch": "arm64",
+                "commit": self.revision,
+                "deps": "",
+            },
+            {
+                "group": "build",
+                "package": "node_exporter",
+                "arch": "amd64",
+                "commit": self.revision,
+                "deps": "",
+            },
         ]
         self.write_rows(self.rows)
 
