@@ -261,10 +261,25 @@ class ValidatePackagesTests(unittest.TestCase):
         self.artifact_package("deb-linux-amd64")
         arm = self.artifact_package("deb-linux-arm64")
         self.metadata["Architecture"] = "all"
-        self.assertEqual(vp.main(["--artifacts", str(self.root)]), 0)
-        arm.write_bytes(b"different all package")
-        with self.assertRaisesRegex(ValueError, "differing SHA256"):
+        with self.assertRaisesRegex(ValueError, "produced by amd64 only"):
             vp.validate_artifacts(self.root)
+        arm.write_bytes(b"different all package")
+        with self.assertRaisesRegex(ValueError, "produced by amd64 only"):
+            vp.validate_artifacts(self.root)
+
+    def test_mixed_artifacts_with_single_all_producer(self) -> None:
+        self.artifact_package("deb-linux-amd64")
+        arm = self.artifact_package("deb-linux-arm64")
+
+        def tool(command, **kwargs):
+            if command[1] == "--field":
+                self.metadata["Architecture"] = (
+                    "arm64" if command[2] == str(arm) else "all"
+                )
+            return self.external_tool(command, **kwargs)
+
+        self.tool.side_effect = tool
+        vp.validate_artifacts(self.root)
 
     def test_artifacts_match_each_package_architecture(self) -> None:
         amd = self.artifact_package("deb-linux-amd64")

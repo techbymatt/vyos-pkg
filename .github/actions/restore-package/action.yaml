@@ -28,6 +28,19 @@ runs:
           ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
           ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
           ${{ fromJSON(inputs.entry).group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
+    - name: Check restored package build outputs
+      shell: bash
+      env:
+        PACKAGE: ${{ fromJSON(inputs.entry).package }}
+        ARCH: ${{ fromJSON(inputs.entry).arch }}
+        GROUP: ${{ fromJSON(inputs.entry).group }}
+      run: |
+        directory=packages
+        if [[ "$GROUP" == build ]]; then
+          directory="vyos-build/scripts/package-build/$PACKAGE"
+        fi
+        python3 scripts/package_build_policy.py check \
+          --group "$GROUP" --package "$PACKAGE" --arch "$ARCH" --directory "$directory"
     - name: Upload the .deb files as artifacts
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:

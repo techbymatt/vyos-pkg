@@ -7,8 +7,15 @@ jobs:
       package: ${{ steps.container.outputs.json }}
       package-extra: ${{ steps.container-extra.outputs.json }}
       deps: ${{ steps.deps.outputs.json }}
+      build-matrix: ${{ steps.plan.outputs.build-matrix }}
+      build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
+      verify-arches: ${{ steps.plan.outputs.verify-arches }}
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
       - id: container
         name: Parse container package list
         run: |
@@ -39,6 +46,19 @@ jobs:
             json=$(printf '%s' "$input" | grep -oE '[^,[:space:]]+' | jq -R . | jq -sc .)
           fi
           echo "json=$json" >> "$GITHUB_OUTPUT"
+      - id: plan
+        name: Plan architecture ownership
+        env:
+          PACKAGES: ${{ steps.container.outputs.json }}
+          EXTRA_PACKAGES: ${{ steps.container-extra.outputs.json }}
+          DEPS: ${{ steps.deps.outputs.json }}
+        run: |
+          build="$(python3 scripts/package_build_policy.py matrix --group build --packages "$PACKAGES")"
+          extra="$(python3 scripts/package_build_policy.py matrix --group build-extra --packages "$EXTRA_PACKAGES" --deps "$DEPS")"
+          echo "build-matrix=$build" >> "$GITHUB_OUTPUT"
+          echo "build-extra-matrix=$extra" >> "$GITHUB_OUTPUT"
+          arches="$(jq -cn --argjson build "$build" --argjson extra "$extra" '[$build.include[].arch, $extra.include[].arch] | unique')"
+          echo "verify-arches=$arches" >> "$GITHUB_OUTPUT"
     timeout-minutes: 5
   build:
     container:
@@ -50,8 +70,10 @@ jobs:
       run:
         shell: bash
     name: Build (container)
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-matrix).include[0] != null }}
     needs: [setup-matrix]
     permissions:
+      contents: read
       packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
@@ -70,12 +92,22 @@ jobs:
           repository: techbymatt/tbm-vyos-patch
           submodules: recursive
           token: ${{ steps.app-token.outputs.token }}
+      - name: Checkout build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: scripts
       - id: patch_vyos_build
         name: Patch vyos-build
         run: |
           cp --verbose ../patches/vyos-build/*.patch .
           git apply --3way --verbose ./*.patch
         working-directory: vyos-build
+      - name: Apply package build policy
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --root vyos-build/scripts/package-build \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
       - name: Setup golang
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -95,6 +127,11 @@ jobs:
       - name: List the .deb files built
         run: |
           ls -halp vyos-build/scripts/package-build/**/*.deb
+      - name: Check package build outputs
+        run: |
+          python3 workflow/scripts/package_build_policy.py check \
+            --group build --package "${{ matrix.package }}" --arch "${{ matrix.arch }}" \
+            --directory "vyos-build/scripts/package-build/${{ matrix.package }}"
       - name: Upload the .deb files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -114,17 +151,7 @@ jobs:
             vyos-build/scripts/package-build/**/*orig.tar.*
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        package: ${{ fromJson(needs.setup-matrix.outputs.package) }}
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-        exclude:
-          - arch: arm64
-            package: shim-signed
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.build-matrix) }}
       max-parallel: 8
     timeout-minutes: 150
   build-extra:
@@ -137,8 +164,10 @@ jobs:
       run:
         shell: bash
     name: Build (extra)
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-extra-matrix).include[0] != null }}
     needs: [setup-matrix]
     permissions:
+      contents: read
       packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
@@ -149,6 +178,11 @@ jobs:
           path: packages/${{ matrix.package }}
           ref: rolling
           repository: vyos/${{ matrix.package }}
+      - name: Checkout build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: scripts
       - if: ${{ matrix.deps }}
         name: Install dependencies
         run: |
@@ -157,11 +191,18 @@ jobs:
       - name: Build the package
         run: |
           sudo apt-get update
-          dpkg-buildpackage --build=binary --post-clean --unsigned-changes --unsigned-source
+          build_type=binary
+          if [[ '${{ matrix.arch }}' == arm64 ]]; then build_type=any; fi
+          dpkg-buildpackage --build="$build_type" --post-clean --unsigned-changes --unsigned-source
         working-directory: packages/${{ matrix.package }}
       - name: List the .deb files built
         run: |
           ls -halp packages/*.deb
+      - name: Check package build outputs
+        run: |
+          python3 workflow/scripts/package_build_policy.py check \
+            --group build-extra --package "${{ matrix.package }}" --arch "${{ matrix.arch }}" \
+            --directory packages
       - name: Upload the .deb files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -181,23 +222,16 @@ jobs:
             packages/*orig.tar.*
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        deps: ${{ fromJson(needs.setup-matrix.outputs.deps) }}
-        package: ${{ fromJson(needs.setup-matrix.outputs.package-extra) }}
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.build-extra-matrix) }}
       max-parallel: 4
   verify:
     defaults:
       run:
         shell: bash
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
+    if: ${{ !cancelled() && fromJSON(needs.setup-matrix.outputs.verify-arches || '[]')[0] != null && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
     name: Verify
     needs:
+      - setup-matrix
       - build
       - build-extra
     permissions:
@@ -242,7 +276,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(needs.setup-matrix.outputs.verify-arches) }}
     timeout-minutes: 30
 name: Test
 on:

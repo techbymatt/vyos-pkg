@@ -176,10 +176,8 @@ jobs:
           for package in "${packages[@]}"; do
             commit="$(package_dir_commit "$package")"
             [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
-            for arch in amd64 arm64; do
-              if [[ "$arch" == 'arm64' && "$package" == 'shim-signed' ]]; then
-                continue
-              fi
+            arches="$(python3 ../workflow/scripts/package_build_policy.py architectures --group build --package "$package")"
+            for arch in $arches; do
               check_and_record build "$package" "$arch" "$commit" ''
             done
           done
@@ -187,7 +185,8 @@ jobs:
           for package in "${extra_packages[@]}"; do
             commit="$(extra_package_commit "$package")"
             deps="$(bash ../workflow/scripts/package_dependencies.sh "$package")"
-            for arch in amd64 arm64; do
+            arches="$(python3 ../workflow/scripts/package_build_policy.py architectures --group build-extra --package "$package")"
+            for arch in $arches; do
               check_and_record build-extra "$package" "$arch" "$commit" "$deps"
             done
           done
@@ -245,6 +244,7 @@ jobs:
     needs:
       - cache-check
     permissions:
+      contents: read
       packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
@@ -264,12 +264,22 @@ jobs:
           repository: techbymatt/tbm-vyos-patch
           submodules: recursive
           token: ${{ steps.app-token.outputs.token }}
+      - name: Checkout build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: scripts
       - id: patch_vyos_build
         name: Patch vyos-build
         run: |
           cp --verbose ../patches/vyos-build/*.patch .
           git apply --3way --verbose ./*.patch
         working-directory: vyos-build
+      - name: Apply package build policy
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --root vyos-build/scripts/package-build \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
       - name: Setup golang
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -302,6 +312,11 @@ jobs:
       - name: List the .deb files built
         run: |
           ls -halp vyos-build/scripts/package-build/${{ matrix.package }}/*.deb
+      - name: Check package build outputs
+        run: |
+          python3 workflow/scripts/package_build_policy.py check \
+            --group build --package "${{ matrix.package }}" --arch "${{ matrix.arch }}" \
+            --directory "vyos-build/scripts/package-build/${{ matrix.package }}"
       - name: Upload the .deb files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -341,6 +356,7 @@ jobs:
     needs:
       - cache-check
     permissions:
+      contents: read
       packages: read
     runs-on: ${{ matrix.runner_label }}
     steps:
@@ -351,6 +367,11 @@ jobs:
           path: packages/${{ matrix.package }}
           ref: ${{ matrix.commit }}
           repository: vyos/${{ matrix.package }}
+      - name: Checkout build policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: scripts
       - id: cache
         name: Cache build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -374,11 +395,18 @@ jobs:
           if [[ -z '${{ matrix.deps }}' ]]; then
             sudo apt-get update
           fi
-          dpkg-buildpackage --build=binary --post-clean --unsigned-changes --unsigned-source
+          build_type=binary
+          if [[ '${{ matrix.arch }}' == arm64 ]]; then build_type=any; fi
+          dpkg-buildpackage --build="$build_type" --post-clean --unsigned-changes --unsigned-source
         working-directory: packages/${{ matrix.package }}
       - name: List the .deb files built
         run: |
           ls -halp packages/*.deb
+      - name: Check package build outputs
+        run: |
+          python3 workflow/scripts/package_build_policy.py check \
+            --group build-extra --package "${{ matrix.package }}" --arch "${{ matrix.arch }}" \
+            --directory packages
       - name: Upload the .deb files as artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
