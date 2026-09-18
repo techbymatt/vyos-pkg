@@ -29,7 +29,67 @@ The amd64 jobs own all `Architecture: all` packages. Mixed sources build both am
 
 Fresh and restored outputs are checked using Debian control metadata before upload. Arm64 may not emit `Architecture: all`, and independent-only sources may not emit architecture-specific binaries. Verify also rejects independent packages from arm64 artifacts, even if their bytes match an amd64 copy. Policy/helper changes invalidate caches, preventing reuse of old dual-producer artifacts. When adding or updating a recipe, review all its binary outputs and nested build commands, update the policy/adaptations as needed, and test both native architectures.
 
-### Local checks
+## Adding packages
+
+### 1. Choose the build path
+
+Add the **source recipe/repository name**, which may differ from the names of the `.deb` packages it produces, to the appropriate array in the **Plan builds from the cache state** step of `.github/workflows/publish.yaml`:
+
+| Build path                 | Publish array    | Source and build command                                            | Dependency configuration                                   |
+| -------------------------- | ---------------- | ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| VyOS build recipe          | `packages`       | `vyos-build/scripts/package-build/<name>/`; runs `python3 build.py` | The recipe's dependency declarations and preparation steps |
+| Standalone VyOS repository | `extra_packages` | `vyos/<name>` on its `rolling` branch; runs `dpkg-buildpackage`     | `scripts/package_dependencies.sh`                          |
+
+For a VyOS build recipe, ensure the recipe is present in the `vyos-build` revision pinned by `techbymatt/tbm-vyos-patch`, including any required downstream patches. Adding a name to this repository's array does not create the upstream recipe.
+
+For a standalone repository, ensure it has working Debian packaging and a `rolling` branch. Add a case to `scripts/package_dependencies.sh` if the build needs additional packages installed. For example:
+
+```sh
+  my-package) echo "libexample-dev pkg-config" ;;
+```
+
+Keep required build dependencies declared in the source's Debian packaging too. The mapping installs prerequisites; it does not replace `debian/control`.
+
+### 2. Classify all binary outputs
+
+Inspect `debian/control`, generated control files, and any nested packaging scripts. Classify the entire source recipe, including documentation, Python modules, and other secondary packages:
+
+| Outputs                                                             | Required policy change                                                                                                    |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Architecture-specific packages for both amd64 and arm64             | None; both architectures are planned by default.                                                                          |
+| A mixture of architecture-specific and `Architecture: all` packages | None in the JSON policy; ensure the builder honors the build modes described below.                                       |
+| Only `Architecture: all` packages                                   | Add the source name to `independent_only.build` or `independent_only.build-extra` in `scripts/package_build_policy.json`. |
+| Architecture-specific packages supported only on amd64              | Add the source name to `amd64_only.build` or `amd64_only.build-extra`.                                                    |
+
+For example, an independent-only standalone repository belongs in `independent_only.build-extra`, alongside `live-boot` and `vyos-live-build`. The policy keys are literal JSON keys, and their values are arrays of source names. Arm64-only sources require extending the planner; the current policy supports dual-architecture and amd64-only scheduling.
+
+### 3. Check the build command
+
+Standard recipes using the shared builder's default command, and standalone repositories using the workflow's direct `dpkg-buildpackage` command, already receive the correct build mode. A mixed source builds its independent packages on amd64 and its architecture-specific packages on both architectures.
+
+If the recipe overrides `build_cmd`, calls another packaging script, or uses another packaging tool, review that path explicitly. If it can produce independent packages:
+
+- Add a checked, recipe-specific adaptation to `scripts/prepare_package_build.py`.
+- Select `--build=binary` on amd64 and `--build=any` on arm64 for binary-only Debian builds. Preserve source output where needed, as the shared builder does with `full` and `source,any`.
+- Skip independent-only sub-builds on arm64 before they execute. Do not build duplicate packages and then delete them before upload.
+- Preserve architecture-specific build steps and dependencies between sub-builds.
+
+Use the existing net-snmp, FRR/libyang, and strongSwan adaptations as examples. Exact command replacements intentionally fail if the expected upstream command changes; review and update the adaptation when upgrading that recipe.
+
+### 4. Validate and enable publication
+
+1. Add focused tests for new policy entries and custom adaptations in `scripts/test_package_build_policy.py` and `scripts/test_prepare_package_build.py`. Include new adapted recipes in the optional upstream-checkout test's package list.
+2. Run the [local checks](#local-checks). To check adaptations against actual recipes, set `VYOS_BUILD_ROOT` to a VyOS checkout's `scripts/package-build` directory after applying the downstream patches.
+3. Run the **Test** workflow from the branch containing your changes:
+   - For a VyOS recipe, set `package` to its source recipe name.
+   - For a standalone repository, set `package-extra` to its repository name and supply any additional dependencies through the comma-separated `deps` input. Test uses that input rather than the Publish dependency mapping.
+   - Leave the unused package input empty. Multiple names can be supplied as a comma-separated list. The shared policy automatically selects the architectures to test.
+4. Inspect the artifacts for the complete expected set of binary packages. Mixed sources should have their `all` packages only in the amd64 artifact; independent-only sources should have no arm64 job. The output checks enforce architecture ownership and nonempty outputs, but do not prove that every expected binary package was produced.
+5. Once the changes are merged, run **Repository** or let its schedule publish them. The new input manifest includes the package, and policy/helper changes automatically invalidate incompatible caches. `force_rebuild` is only needed when deliberately bypassing caches, such as to refresh moving upstream inputs.
+
+The Test workflow accepts package names directly, so adding a package does not require maintaining a second static package list there.
+
+## Local checks
 
 Run the local checks with:
 
