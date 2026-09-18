@@ -35,7 +35,7 @@ RESTORE_BATCH_SIZE = 8
 
 
 def runner_label(arch: str) -> str:
-    return "ubuntu-24.04" if arch == "amd64" else "ubuntu-24.04-arm"
+    return "ubuntu-26.04" if arch == "amd64" else "ubuntu-26.04-arm"
 
 
 def parse_input(raw: str, *, dependency: bool = False) -> list[str]:

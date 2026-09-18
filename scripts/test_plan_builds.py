@@ -124,7 +124,7 @@ class PublishPlannerTests(unittest.TestCase):
                     "package": "frr",
                     "arch": "amd64",
                     "commit": REVISION,
-                    "runner_label": "ubuntu-24.04",
+                    "runner_label": "ubuntu-26.04",
                     "cache_key": cache_key(rows[0], "123-1"),
                 }
             ],
@@ -134,7 +134,7 @@ class PublishPlannerTests(unittest.TestCase):
         )
         self.assertEqual(
             result["build-extra-matrix"]["include"][0]["runner_label"],
-            "ubuntu-24.04-arm",
+            "ubuntu-26.04-arm",
         )
         self.assertEqual(rows, before)
 
@@ -205,7 +205,7 @@ class PublishPlannerTests(unittest.TestCase):
         self.assertEqual([len(batch["entries"]) for batch in batches], [8, 1, 8, 1])
         self.assertEqual(
             [batch["runner_label"] for batch in batches],
-            ["ubuntu-24.04"] * 2 + ["ubuntu-24.04-arm"] * 2,
+            ["ubuntu-26.04"] * 2 + ["ubuntu-26.04-arm"] * 2,
         )
         self.assertEqual(
             len(
