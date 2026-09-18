@@ -169,7 +169,7 @@ class TestWorkflowTests(unittest.TestCase):
                 self.assertIn('architectures: \'["amd64","arm64"]\'', text)
                 self.assertIn("needs.cache-check.outputs.changed == 'true'", text)
         verify = (WORKFLOWS / "verify-packages.yaml").read_text()
-        self.assertIn("runs-on: ubuntu-24.04", verify)
+        self.assertIn("runs-on: ubuntu-26.04", verify)
         self.assertNotIn("container:", verify)
         self.assertNotIn("matrix:", verify)
         self.assertIn("pattern: deb-*\n", verify)
