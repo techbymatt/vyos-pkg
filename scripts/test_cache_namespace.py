@@ -67,6 +67,8 @@ class NamespaceTests(unittest.TestCase):
         dependencies = self.workflow / cn.DEPENDENCIES_RELATIVE
         dependencies.parent.mkdir(parents=True)
         dependencies.write_text(DEPENDENCIES, encoding="utf-8")
+        for relative in cn.POLICY_RELATIVES:
+            (self.workflow / relative).write_text("policy fixture\n", encoding="utf-8")
 
     def namespace(self) -> str:
         return cn.namespace(*INPUTS, self.workflow)
@@ -80,7 +82,10 @@ class NamespaceTests(unittest.TestCase):
             cn.build_surface(self.workflow),
             "  build:\n    name: Build\n    steps:\n      - run: docker run image\n"
             "  build-extra:\n    name: Build extra\n    steps:\n"
-            "      - run: docker build\n" + COMPOSITE + DEPENDENCIES,
+            "      - run: docker build\n"
+            + COMPOSITE
+            + DEPENDENCIES
+            + "policy fixture\n" * len(cn.POLICY_RELATIVES),
         )
 
     def test_last_job_block_extends_to_the_end_of_the_file(self) -> None:
@@ -134,6 +139,18 @@ class NamespaceTests(unittest.TestCase):
 
     def test_missing_dependency_file_is_rejected(self) -> None:
         (self.workflow / cn.DEPENDENCIES_RELATIVE).unlink()
+        with self.assertRaises(OSError):
+            self.namespace()
+
+    def test_each_policy_input_invalidates_caches(self) -> None:
+        for relative in cn.POLICY_RELATIVES:
+            with self.subTest(path=relative):
+                before = self.namespace()
+                (self.workflow / relative).write_text("updated policy\n")
+                self.assertNotEqual(self.namespace(), before)
+
+    def test_missing_policy_input_is_rejected(self) -> None:
+        (self.workflow / cn.POLICY_RELATIVES[0]).unlink()
         with self.assertRaises(OSError):
             self.namespace()
 

@@ -171,6 +171,8 @@ def _validate_packages(packages: list[tuple[Path, str]]) -> None:
                 raise ValueError(
                     f"unexpected Architecture: {actual_arch} (wanted {arch} or all)"
                 )
+            if arch == "arm64" and actual_arch == "all":
+                raise ValueError("Architecture: all must be produced by amd64 only")
             _, sums = read_archive(path, "--ctrl-tarfile")
             digests, _ = read_archive(path, "--fsys-tarfile")
             if sums is not None:
