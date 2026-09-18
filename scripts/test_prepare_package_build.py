@@ -6,6 +6,8 @@ every adaptation against real upstream recipes (copies only; never builds them).
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,104 @@ try:
     from . import prepare_package_build as prepare
 except ImportError:
     import prepare_package_build as prepare
+
+
+# Minimal legacy rules reproducing the upstream target layout, with real dpkg
+# packaging commands so Debian tests can exercise the failure and the repair.
+LEGACY_BIOSDEVNAME_RULES = """#!/usr/bin/make -f
+build: build-stamp
+build-stamp:
+\ttouch $@
+clean:
+\trm -rf debian/vyatta-biosdevname debian/files build-stamp
+install: build
+\tmkdir -p debian/vyatta-biosdevname/DEBIAN
+# Build architecture-independent files here.
+binary-indep: build install
+\tdpkg-gencontrol -pvyatta-biosdevname -Pdebian/vyatta-biosdevname
+\tdpkg-deb --build --root-owner-group debian/vyatta-biosdevname ..
+# Build architecture-dependent files here.
+binary-arch: build install
+# This is an architecture independent package
+# so; we have nothing to do by default.
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install
+"""
+
+
+class ExtraPrepareTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.debian = self.root / "vyatta-biosdevname" / "debian"
+        self.debian.mkdir(parents=True)
+        (self.debian / "control").write_text(
+            "Source: vyatta-biosdevname\n\nPackage: vyatta-biosdevname\nArchitecture: any\n"
+        )
+        self.rules = self.debian / "rules"
+        self.rules.write_text(LEGACY_BIOSDEVNAME_RULES)
+
+    def test_cli_handles_extra_sources_without_shared_builder(self) -> None:
+        for arch in ("amd64", "arm64"):
+            with self.subTest(arch=arch):
+                self.rules.write_text(LEGACY_BIOSDEVNAME_RULES)
+                subprocess.run(
+                    [
+                        sys.executable,
+                        prepare.__file__,
+                        "--group",
+                        "build-extra",
+                        "--root",
+                        str(self.root),
+                        "--package",
+                        "vyatta-biosdevname",
+                        "--arch",
+                        arch,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                result = self.rules.read_text()
+                self.assertIn("build-arch: build-stamp\n", result)
+                self.assertIn("build-indep:\n", result)
+                self.assertIn("binary-arch: build install\n\tdpkg-gencontrol", result)
+                self.assertIn("binary-indep:\nbinary:", result)
+                self.assertNotIn("independent package\n# so;", result)
+
+    def test_other_extra_packages_are_untouched(self) -> None:
+        prepare.prepare_extra(self.root, "live-boot")
+        self.assertEqual(self.rules.read_text(), LEGACY_BIOSDEVNAME_RULES)
+
+    def test_rule_drift_fails_without_partial_edits(self) -> None:
+        for changed in (
+            LEGACY_BIOSDEVNAME_RULES.replace(
+                "binary-arch: build install", "binary-arch: install"
+            ),
+            LEGACY_BIOSDEVNAME_RULES + "build-arch: build\n",
+            LEGACY_BIOSDEVNAME_RULES.replace(
+                ".PHONY: build clean", ".PHONY: clean build"
+            ),
+        ):
+            with self.subTest(rules=changed):
+                self.rules.write_text(changed)
+                with self.assertRaises(ValueError):
+                    prepare.prepare_extra(self.root, "vyatta-biosdevname")
+                self.assertEqual(self.rules.read_text(), changed)
+
+    def test_control_drift_fails_without_edits(self) -> None:
+        for control in (
+            "Package: vyatta-biosdevname\nArchitecture: all\n",
+            "Package: vyatta-biosdevname\nArchitecture: any\n\nPackage: new-data\nArchitecture: all\n",
+        ):
+            with self.subTest(control=control):
+                (self.debian / "control").write_text(control)
+                with self.assertRaisesRegex(
+                    ValueError, "expected one Architecture: any"
+                ):
+                    prepare.prepare_extra(self.root, "vyatta-biosdevname")
+                self.assertEqual(self.rules.read_text(), LEGACY_BIOSDEVNAME_RULES)
 
 
 class PrepareTests(unittest.TestCase):
