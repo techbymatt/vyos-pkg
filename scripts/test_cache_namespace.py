@@ -31,6 +31,7 @@ EXCLUDED_INPUTS = (
     ".github/workflows/test.yaml",
     ".github/workflows/verify-packages.yaml",
     "scripts/validate_packages.py",
+    "scripts/report_lintian.py",
     "scripts/build_repo.sh",
     "scripts/publish_manifest.py",
     "README.md",
@@ -67,6 +68,7 @@ class NamespaceTests(unittest.TestCase):
                 "--workflow",
                 str(root),
             ],
+            check=False,
             capture_output=True,
             text=True,
         )

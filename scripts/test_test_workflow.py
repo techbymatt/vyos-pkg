@@ -177,7 +177,10 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn(
             '--artifacts packages --expected-arches "$EXPECTED_ARCHES"', verify
         )
-        self.assertIn("> lintian-report.txt 2>&1 || status=$?", verify)
+        self.assertIn("python3 scripts/report_lintian.py --artifacts packages", verify)
+        self.assertIn("timeout-minutes: 5", verify)
+        self.assertIn("timeout-minutes: 12", verify)
+        self.assertIn("always() && hashFiles('lintian-report.txt') != ''", verify)
         self.assertIn("continue-on-error: true", verify)
 
     def test_publication_requires_successful_verification(self):
