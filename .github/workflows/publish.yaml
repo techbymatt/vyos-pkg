@@ -1,5 +1,10 @@
 ---
 # $schema: https://json.schemastore.org/github-workflow.json
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+env:
+  BUILD_IMAGE: ghcr.io/techbymatt/vyos-build:rolling
 jobs:
   cache-check:
     defaults:
@@ -7,13 +12,30 @@ jobs:
         shell: bash
     name: Cache check
     outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      image: ${{ steps.image.outputs.image }}
+      patch-commit: ${{ steps.plan.outputs.patch-commit }}
       build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
       build-matrix: ${{ steps.plan.outputs.build-matrix }}
       restore-matrix: ${{ steps.plan.outputs.restore-matrix }}
     permissions:
       actions: read
+      pages: read
+      contents: read
+      packages: read
     runs-on: ubuntu-26.04
     steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+      - id: image
+        name: Resolve the build image digest
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$BUILD_IMAGE" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${BUILD_IMAGE%:*}@${digest}" >> "$GITHUB_OUTPUT"
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -25,501 +47,130 @@ jobs:
         name: Checkout the tbm-vyos-patch repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: patch
           fetch-depth: 0
           repository: techbymatt/tbm-vyos-patch
           submodules: recursive
           token: ${{ steps.app-token.outputs.token }}
       - id: plan
         name: Plan builds from the cache state
+        working-directory: patch
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_IMAGE: ${{ steps.image.outputs.image }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || false }}
         run: |
           set -euo pipefail
-
-          packages=(
-            amazon-cloudwatch-agent
-            amazon-ssm-agent
-            aws-gwlbtun
-            bash-completion
-            blackbox_exporter
-            ddclient
-            dropbear
-            ethtool
-            frr
-            frr_exporter
-            hostap
-            hsflowd
-            iproute2
-            isc-dhcp
-            isc-kea
-            keepalived
-            libhtp
-            libnss-mapuser
-            libpam-radius-auth
-            linux-kernel
-            ndppd
-            net-snmp
-            netfilter
-            node_exporter
-            openssl
-            openvpn
-            openvpn-otp
-            owamp
-            podman
-            pyhumps
-            radvd
-            shim-signed
-            squid
-            strongswan
-            tacacs
-            telegraf
-            udp-broadcast-relay
-            vyos-1x
-            waagent
-            wide-dhcpv6
-            xen-guest-agent
-            zerotier-one
-          )
-          extra_packages=(
-            hvinfo
-            ipaddrcheck
-            libnss-tacplus
-            libpam-tacplus
-            libtacplus-map
-            live-boot
-            vyatta-bash
-            vyatta-biosdevname
-            vyatta-cfg
-            vyos-http-api-tools
-            vyos-live-build
-          )
-
-          extra_package_deps() {
-            case "$1" in
-              hvinfo) echo "gnat gprbuild" ;;
-              ipaddrcheck) echo "check libcidr-dev" ;;
-              libnss-tacplus) echo "libaudit-dev libpam-tacplus-dev libtac-dev libtacplus-map-dev" ;;
-              libpam-tacplus) echo "autoconf-archive libaudit-dev libpam-dev libssl-dev libtacplus-map-dev" ;;
-              libtacplus-map) echo "autoconf-archive libaudit-dev" ;;
-              vyatta-bash) echo "bison libncurses5-dev" ;;
-              vyatta-biosdevname) echo "libpci-dev" ;;
-              vyatta-cfg) echo "bison flex libboost-filesystem-dev libglib2.0-dev" ;;
-              vyos-http-api-tools) echo "dh-virtualenv" ;;
-              *) echo "" ;;
-            esac
-          }
-
-          package_dir_commit() {
-            local package="$1"
-            if [[ "$package" == 'linux-kernel' ]]; then
-              git -C vyos-build log -n 1 --format=%H -- 'data/defaults.toml' "scripts/package-build/${package}/"
-            else
-              git -C vyos-build log -n 1 --format=%H -- "scripts/package-build/${package}/"
-            fi
-          }
-
-          extra_package_commit() {
-            local commit
-            commit="$(git ls-remote "https://github.com/vyos/${1}.git" refs/heads/rolling | cut -f1)" || true
-            printf '%s\n' "$commit"
-          }
-
-          record() {
-            local list="$1" outcome="$2" package="$3" arch="$4" commit="$5" deps="$6"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "$list" "$outcome" "$package" "$arch" "$commit" "$deps" >>"${decisions}"
-            printf '%s/%s: cache %s (cache-%s-%s-%s)\n' \
-              "$package" "$arch" "$outcome" "$package" "$arch" "$commit"
-          }
-
-          check_and_record() {
-            local list="$1" package="$2" arch="$3" commit="$4" deps="$5"
-            if grep -Fxq "cache-${package}-${arch}-${commit}" "${cached_keys}"; then
-              record "$list" hit "$package" "$arch" "$commit" "$deps"
-            else
-              record "$list" miss "$package" "$arch" "$commit" "$deps"
-            fi
-          }
-
-          workdir="$(mktemp -d)"
-          trap 'rm -rf "${workdir}"' EXIT
-          decisions="${workdir}/decisions.tsv"
-          cached_keys="${workdir}/cached-keys.txt"
-
-          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
-          DEFAULT_BRANCH="${default_branch}" gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
-            --jq '.actions_caches[]
-                  | select(.ref == env.GITHUB_REF or .ref == "refs/heads/" + env.DEFAULT_BRANCH)
-                  | .key' \
-            >"${cached_keys}"
-
-          for package in "${packages[@]}"; do
-            commit="$(package_dir_commit "$package")"
-            for arch in amd64 arm64; do
-              if [[ "$arch" == 'arm64' && "$package" == 'shim-signed' ]]; then
-                continue
-              fi
-              check_and_record build "$package" "$arch" "$commit" ''
-            done
-          done
-
-          for package in "${extra_packages[@]}"; do
-            commit="$(extra_package_commit "$package")"
-            for arch in amd64 arm64; do
-              check_and_record build-extra "$package" "$arch" "$commit" "$(extra_package_deps "$package")"
-            done
-          done
-
-          jq -rRs '
-            def runner_label:
-              if . == "amd64" then "ubuntu-24.04" else "ubuntu-24.04-arm" end;
-            def entry:
-              {
-                package: .[2],
-                arch: .[3],
-                runner_label: (.[3] | runner_label),
-                commit: .[4],
-                group: .[0]
-              }
-              + (if .[5] == "" then {} else {deps: .[5]} end);
-            rtrimstr("\n")
-            | split("\n")
-            | map(select(length > 0) | split("\t"))
-            | {
-                "build-matrix": {
-                  include: [.[] | select(.[0] == "build" and .[1] == "miss") | entry]
-                },
-                "build-extra-matrix": {
-                  include: [.[] | select(.[0] == "build-extra" and .[1] == "miss") | entry]
-                },
-                "restore-matrix": {
-                  include: ([.[] | select(.[0] == "build" and .[1] == "hit") | entry]
-                            + [.[] | select(.[0] == "build-extra" and .[1] == "hit") | entry])
-                }
-              }
-            | to_entries[]
-            | "\(.key)=\(.value)"
-          ' "${decisions}" >>"${GITHUB_OUTPUT}"
+          force=()
+          if [[ "$FORCE_REBUILD" == true ]]; then force+=(--force-rebuild); fi
+          python3 ../workflow/scripts/plan_builds.py publish \
+            --patch-root . --workflow-root ../workflow --image "$BUILD_IMAGE" \
+            --repository-commit "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" --run "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${force[@]}" >> "$GITHUB_OUTPUT"
+      - name: Upload planned publication inputs
+        if: ${{ steps.plan.outputs.changed == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: input-manifest
+          path: workflow/input-manifest.json
+          if-no-files-found: error
     timeout-minutes: 30
   build:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
     if: ${{ fromJSON(needs.cache-check.outputs.build-matrix).include[0] != null }}
-    name: Build (container)
-    needs:
-      - cache-check
+    needs: [cache-check]
     permissions:
+      contents: read
       packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          owner: techbymatt
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-      - id: checkout
-        name: Checkout the tbm-vyos-patch repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          repository: techbymatt/tbm-vyos-patch
-          submodules: recursive
-          token: ${{ steps.app-token.outputs.token }}
-      - id: patch_vyos_build
-        name: Patch vyos-build
-        run: |
-          cp --verbose ../patches/vyos-build/*.patch .
-          git apply --3way --verbose ./*.patch
-        working-directory: vyos-build
-      - name: Setup golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.1"
-      - if: ${{ matrix.arch == 'amd64' && matrix.package == 'shim-signed' }}
-        name: Prefer VyOS shim dependencies
-        run: |
-          printf '%s\n' \
-            'Package: shim-unsigned shim-helpers-amd64-signed shim-helpers-amd64-signed-template' \
-            'Pin: origin "packages.vyos.net"' \
-            'Pin-Priority: 1001' \
-            | sudo tee /etc/apt/preferences.d/vyos-shim >/dev/null
-      - id: package_dir_commit
-        name: Get package directory commit
-        run: |
-          if [[ '${{ matrix.package }}' == 'linux-kernel' ]]; then
-            hash="$(git log -n 1 --format=%H -- 'data/defaults.toml' 'scripts/package-build/${{ matrix.package }}/')"
-          else
-            hash="$(git log -n 1 --format=%H -- 'scripts/package-build/${{ matrix.package }}/')"
-          fi
-          echo "commit=${hash}" >> "$GITHUB_OUTPUT"
-        working-directory: vyos-build
-      - id: cache
-        name: Cache build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ steps.package_dir_commit.outputs.commit }}
-          path: |
-            vyos-build/scripts/package-build/${{ matrix.package }}/*.deb
-            vyos-build/scripts/package-build/**/*.buildinfo
-            vyos-build/scripts/package-build/**/*.changes
-            vyos-build/scripts/package-build/**/*.dsc
-            vyos-build/scripts/package-build/**/*debian.tar.*
-            vyos-build/scripts/package-build/**/*orig.tar.*
-      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
-        name: Build the package
-        run: |
-          python3 build.py
-        working-directory: vyos-build/scripts/package-build/${{ matrix.package }}
-      - name: List the .deb files built
-        run: |
-          ls -halp vyos-build/scripts/package-build/${{ matrix.package }}/*.deb
-      - name: Upload the .deb files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: error
-          name: deb-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            vyos-build/scripts/package-build/${{ matrix.package }}/*.deb
-      - name: Upload the remaining build files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: ignore
-          name: build-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            vyos-build/scripts/package-build/**/*.buildinfo
-            vyos-build/scripts/package-build/**/*.changes
-            vyos-build/scripts/package-build/**/*.dsc
-            vyos-build/scripts/package-build/**/*debian.tar.*
-            vyos-build/scripts/package-build/**/*orig.tar.*
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.cache-check.outputs.build-matrix) }}
+    uses: ./.github/workflows/build-recipe.yaml
+    with:
+      matrix: ${{ needs.cache-check.outputs.build-matrix }}
+      image: ${{ needs.cache-check.outputs.image }}
+      build-ref: ${{ needs.cache-check.outputs.patch-commit }}
+      cache: true
       max-parallel: 4
-    timeout-minutes: 150
+    secrets: inherit
   build-extra:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
     if: ${{ fromJSON(needs.cache-check.outputs.build-extra-matrix).include[0] != null }}
-    name: Build (extra)
-    needs:
-      - cache-check
+    needs: [cache-check]
     permissions:
+      contents: read
       packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - id: checkout
-        name: Checkout the package repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: packages/${{ matrix.package }}
-          ref: ${{ matrix.commit }}
-          repository: vyos/${{ matrix.package }}
-      - if: ${{ matrix.deps }}
-        name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ${{ matrix.deps }}
-      - id: cache
-        name: Cache build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ matrix.commit }}
-          path: |
-            packages/*.deb
-            packages/*.buildinfo
-            packages/*.changes
-            packages/*.dsc
-            packages/*debian.tar.*
-            packages/*orig.tar.*
-      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
-        name: Build the package
-        run: |
-          sudo apt-get update
-          dpkg-buildpackage --build=binary --post-clean --unsigned-changes --unsigned-source
-        working-directory: packages/${{ matrix.package }}
-      - name: List the .deb files built
-        run: |
-          ls -halp packages/*.deb
-      - name: Upload the .deb files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: error
-          name: deb-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            packages/*.deb
-      - name: Upload the remaining build files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: ignore
-          name: build-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            packages/*.buildinfo
-            packages/*.changes
-            packages/*.dsc
-            packages/*debian.tar.*
-            packages/*orig.tar.*
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.cache-check.outputs.build-extra-matrix) }}
-      max-parallel: 4
-    timeout-minutes: 30
+    uses: ./.github/workflows/build-standalone.yaml
+    with:
+      matrix: ${{ needs.cache-check.outputs.build-extra-matrix }}
+      image: ${{ needs.cache-check.outputs.image }}
+      build-ref: rolling
+      cache: true
   restore-cached:
     if: ${{ fromJSON(needs.cache-check.outputs.restore-matrix).include[0] != null }}
     name: Restore (cache hit)
     needs:
       - cache-check
     permissions:
-      packages: read
+      contents: read
     runs-on: ${{ matrix.runner_label }}
     steps:
-      - name: Shadow zstd so the cache version matches the gzip archives
-        run: |
-          shim="$(mktemp -d)"
-          printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
-          chmod +x "$shim/zstd"
-          echo "$shim" >>"$GITHUB_PATH"
-      - name: Restore the cached build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Checkout restore action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          key: cache-${{ matrix.package }}-${{ matrix.arch }}-${{ matrix.commit }}
-          path: |
-            ${{ matrix.group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', matrix.package) || 'packages/*.deb' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
-      - name: Upload the .deb files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          path: workflow
+      - name: Restore package 1
+        if: ${{ matrix.entries[0] != null }}
+        uses: ./workflow/.github/actions/restore-package
         with:
-          if-no-files-found: error
-          name: deb-${{ matrix.package }}-${{ matrix.arch }}
-          path: ${{ matrix.group == 'build' && format('vyos-build/scripts/package-build/{0}/*.deb', matrix.package) || 'packages/*.deb' }}
-      - name: Upload the remaining build files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          entry: ${{ toJSON(matrix.entries[0]) }}
+      - name: Restore package 2
+        if: ${{ matrix.entries[1] != null }}
+        uses: ./workflow/.github/actions/restore-package
         with:
-          if-no-files-found: ignore
-          name: build-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.buildinfo' || 'packages/*.buildinfo' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.changes' || 'packages/*.changes' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*.dsc' || 'packages/*.dsc' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*debian.tar.*' || 'packages/*debian.tar.*' }}
-            ${{ matrix.group == 'build' && 'vyos-build/scripts/package-build/**/*orig.tar.*' || 'packages/*orig.tar.*' }}
+          entry: ${{ toJSON(matrix.entries[1]) }}
+      - name: Restore package 3
+        if: ${{ matrix.entries[2] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[2]) }}
+      - name: Restore package 4
+        if: ${{ matrix.entries[3] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[3]) }}
+      - name: Restore package 5
+        if: ${{ matrix.entries[4] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[4]) }}
+      - name: Restore package 6
+        if: ${{ matrix.entries[5] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[5]) }}
+      - name: Restore package 7
+        if: ${{ matrix.entries[6] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[6]) }}
+      - name: Restore package 8
+        if: ${{ matrix.entries[7] != null }}
+        uses: ./workflow/.github/actions/restore-package
+        with:
+          entry: ${{ toJSON(matrix.entries[7]) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.cache-check.outputs.restore-matrix) }}
-    timeout-minutes: 20
+    timeout-minutes: 40
   verify:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
-    name: Verify
+    if: ${{ !cancelled() && needs.cache-check.outputs.changed == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
     needs:
+      - cache-check
       - build
       - build-extra
       - restore-cached
-    permissions:
-      packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - name: Download the .deb file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages
-          pattern: deb-*-${{ matrix.arch }}
-      - name: Verify the .deb files can be installed
-        run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install apt-utils
-          shopt -s globstar nullglob
-          packages=(./packages/**/*.deb)
-          if ((${#packages[@]} == 0)); then
-            echo "No .deb files found" >&2
-            exit 1
-          fi
-          excluded_packages=(
-            strongswan-charon
-            strongswan-charon-dbgsym
-          )
-
-          repository="$(mktemp -d)"
-          chmod 755 "$repository"
-          source_list=/etc/apt/sources.list.d/vyos-package-verification.list
-          preferences=/etc/apt/preferences.d/vyos-package-verification
-          cleanup() {
-            sudo rm -f "$source_list" "$preferences"
-            rm -rf "$repository"
-          }
-          trap cleanup EXIT
-
-          package_index=0
-          for package in "${packages[@]}"; do
-            ln -s "$(realpath "$package")" "$repository/$package_index.deb"
-            package_index=$((package_index + 1))
-          done
-          (
-            cd "$repository"
-            apt-ftparchive packages . > Packages
-            apt-ftparchive \
-              -o APT::FTPArchive::Release::Origin=VyOS-Verification \
-              -o APT::FTPArchive::Release::Label=VyOS-Verification \
-              release . > Release
-          )
-          printf 'deb [trusted=yes] file:%s ./\n' "$repository" \
-            | sudo tee "$source_list" >/dev/null
-          printf '%s\n' \
-            'Package: *' \
-            'Pin: release o=VyOS-Verification' \
-            'Pin-Priority: 1001' \
-            | sudo tee "$preferences" >/dev/null
-          sudo apt-get -o APT::Sandbox::User=root update
-
-          for package in "${packages[@]}"; do
-            package_name="$(dpkg-deb --field "$package" Package)"
-            package_version="$(dpkg-deb --field "$package" Version)"
-            if [[ " ${excluded_packages[*]} " == *" $package_name "* ]]; then
-              continue
-            fi
-            sudo apt-get -o APT::Sandbox::User=root \
-              -o Dpkg::Options::=--force-confdef \
-              -o Dpkg::Options::=--force-confold \
-              --no-install-recommends --allow-downgrades --reinstall --yes install \
-              "$package_name=$package_version"
-          done
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-    timeout-minutes: 30
+    uses: ./.github/workflows/verify-packages.yaml
+    with:
+      architectures: '["amd64","arm64"]'
   publish:
-    if: ${{ needs.verify.result == 'success' }}
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -527,12 +178,18 @@ jobs:
     needs:
       - verify
     permissions:
+      contents: read
       id-token: write
       pages: write
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout the vyos-pkg repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download planned publication inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: input-manifest
+          path: ${{ runner.temp }}/publication
       - name: Download the .deb file artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -549,9 +206,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get --no-install-recommends --yes install \
-            jq \
-            createrepo-c \
-            coreutils \
             gnupg2 \
             dpkg-dev
       - name: Insert environment variables
@@ -559,7 +213,6 @@ jobs:
           {
             echo GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
             echo REPO_OWNER="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f1)"
-            echo REPO_NAME="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f2)"
           } >> "$GITHUB_ENV"
       - id: import_gpg
         name: Import GPG key
@@ -580,14 +233,13 @@ jobs:
           export ORIGIN="${{ steps.import_gpg.outputs.name }}"
           sudo chown -R "$(whoami):$(whoami)" _site/
           scripts/build_repo.sh
-      - name: Delete scripts/ repo
-        run: |
-          rm -r scripts
       - name: Generate directory indices
         uses: gacts/directory-listing@dbce3ff489d0e8689b0c45c6a63fe28b2a23ca66 # v1.0.6
         with:
           show-hidden: true
           target: _site/deb
+      - name: Include publication inputs in the deployment
+        run: cp "$RUNNER_TEMP/publication/input-manifest.json" _site/input-manifest.json
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
       - id: deployment
@@ -599,5 +251,10 @@ on:
   schedule:
     - cron: "42 20 * * *"
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild all packages and verify/publish even when recorded inputs match
+        default: false
+        type: boolean
 permissions:
   contents: read

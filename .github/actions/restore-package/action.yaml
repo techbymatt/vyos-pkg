@@ -1,0 +1,53 @@
+---
+# $schema: https://json.schemastore.org/github-action.json
+name: Restore package
+description: Restore and upload one cached package, then clean up its restored files.
+inputs:
+  entry:
+    description: JSON object with package, arch, group, and the full cache_key.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Shadow zstd so the cache version matches the gzip archives
+      shell: bash
+      run: |
+        shim="$(mktemp -d)"
+        printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
+        chmod +x "$shim/zstd"
+        echo "$shim" >>"$GITHUB_PATH"
+    - id: paths
+      uses: ./workflow/.github/actions/package-paths
+      with:
+        group: ${{ fromJSON(inputs.entry).group }}
+        package: ${{ fromJSON(inputs.entry).package }}
+    - name: Restore the cached build
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        fail-on-cache-miss: true
+        key: ${{ fromJSON(inputs.entry).cache_key }}
+        path: ${{ steps.paths.outputs.cache }}
+    - name: Check and upload package artifacts
+      uses: ./workflow/.github/actions/package-artifacts
+      with:
+        group: ${{ fromJSON(inputs.entry).group }}
+        package: ${{ fromJSON(inputs.entry).package }}
+        arch: ${{ fromJSON(inputs.entry).arch }}
+    - name: Clean up restored package files
+      if: ${{ always() }}
+      shell: bash
+      env:
+        CACHE_PATHS: ${{ steps.paths.outputs.cache }}
+      run: |
+        python3 - <<'PY'
+        import glob
+        import os
+        from pathlib import Path
+
+        # Remove files only; source directories can belong to the caller.
+        for pattern in os.environ['CACHE_PATHS'].splitlines():
+            for match in glob.glob(pattern, recursive=True):
+                path = Path(match)
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+        PY

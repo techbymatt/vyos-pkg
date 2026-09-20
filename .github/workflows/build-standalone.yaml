@@ -1,0 +1,95 @@
+---
+name: Build standalone packages
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      build-ref:
+        description: Fallback source ref when the matrix does not pin a commit.
+        required: true
+        type: string
+      cache:
+        default: false
+        type: boolean
+permissions:
+  contents: read
+  packages: read
+jobs:
+  build:
+    runs-on: ${{ matrix.runner_label }}
+    container:
+      env:
+        TZ: Australia/Brisbane
+      image: ${{ inputs.image }}
+      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+      max-parallel: 4
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the package repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: packages/${{ matrix.package }}
+          ref: ${{ matrix.commit || inputs.build-ref }}
+          repository: vyos/${{ matrix.package }}
+      - name: Checkout build tools and actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          sparse-checkout: |
+            scripts
+            .github/actions
+      - id: paths
+        uses: ./workflow/.github/actions/package-paths
+        with:
+          group: build-extra
+          package: ${{ matrix.package }}
+      - id: cache
+        name: Cache build
+        if: ${{ inputs.cache }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ matrix.cache_key }}
+          path: ${{ steps.paths.outputs.cache }}
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.deps }}
+        name: Install dependencies
+        env:
+          DEPS: ${{ matrix.deps }}
+        run: |
+          sudo apt-get update
+          read -r -a dependencies <<< "$DEPS"
+          sudo apt-get install --yes "${dependencies[@]}"
+      - name: Apply standalone package build policy
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --group build-extra --root packages \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        name: Build the package
+        env:
+          DEPS: ${{ matrix.deps }}
+        run: |
+          if [[ -z "$DEPS" ]]; then
+            sudo apt-get update
+          fi
+          build_type=binary
+          if [[ '${{ matrix.arch }}' == arm64 ]]; then build_type=any; fi
+          dpkg-buildpackage --build="$build_type" --post-clean --unsigned-changes --unsigned-source
+        working-directory: packages/${{ matrix.package }}
+      - name: Check and upload package artifacts
+        uses: ./workflow/.github/actions/package-artifacts
+        with:
+          group: build-extra
+          package: ${{ matrix.package }}
+          arch: ${{ matrix.arch }}

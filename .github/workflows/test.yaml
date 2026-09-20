@@ -1,375 +1,77 @@
 ---
 # $schema: https://json.schemastore.org/github-workflow.json
-jobs:
-  setup-matrix:
-    name: Setup matrix
-    outputs:
-      package: ${{ steps.container.outputs.json }}
-      package-extra: ${{ steps.container-extra.outputs.json }}
-      deps: ${{ steps.deps.outputs.json }}
-    runs-on: ubuntu-26.04
-    steps:
-      - id: container
-        name: Parse container package list
-        run: |
-          input='${{ inputs.package }}'
-          if ! printf '%s' "$input" | grep -qE '[^,[:space:]]+'; then
-            json='[]'
-          else
-            json=$(printf '%s' "$input" | grep -oE '[^,[:space:]]+' | jq -R . | jq -sc .)
-          fi
-          echo "json=$json" >> "$GITHUB_OUTPUT"
-      - id: container-extra
-        name: Parse container package-extra list
-        run: |
-          input='${{ inputs.package-extra }}'
-          if ! printf '%s' "$input" | grep -qE '[^,[:space:]]+'; then
-            json='[]'
-          else
-            json=$(printf '%s' "$input" | grep -oE '[^,[:space:]]+' | jq -R . | jq -sc .)
-          fi
-          echo "json=$json" >> "$GITHUB_OUTPUT"
-      - id: deps
-        name: Parse container deps list
-        run: |
-          input='${{ inputs.deps }}'
-          if ! printf '%s' "$input" | grep -qE '[^,[:space:]]+'; then
-            json='[]'
-          else
-            json=$(printf '%s' "$input" | grep -oE '[^,[:space:]]+' | jq -R . | jq -sc .)
-          fi
-          echo "json=$json" >> "$GITHUB_OUTPUT"
-    timeout-minutes: 5
-  build:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
-    name: Build (container)
-    needs: [setup-matrix]
-    permissions:
-      packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          owner: techbymatt
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-      - id: checkout
-        name: Checkout the tbm-vyos-patch repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          repository: techbymatt/tbm-vyos-patch
-          submodules: recursive
-          token: ${{ steps.app-token.outputs.token }}
-      - id: patch_vyos_build
-        name: Patch vyos-build
-        run: |
-          cp --verbose ../patches/vyos-build/*.patch .
-          git apply --3way --verbose ./*.patch
-        working-directory: vyos-build
-      - name: Setup golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.1"
-      - if: ${{ matrix.arch == 'amd64' && matrix.package == 'shim-signed' }}
-        name: Prefer VyOS shim dependencies
-        run: |
-          printf '%s\n' \
-            'Package: shim-unsigned shim-helpers-amd64-signed shim-helpers-amd64-signed-template' \
-            'Pin: origin "packages.vyos.net"' \
-            'Pin-Priority: 1001' \
-            | sudo tee /etc/apt/preferences.d/vyos-shim >/dev/null
-      - name: Build the package
-        run: |
-          python3 build.py
-        working-directory: vyos-build/scripts/package-build/${{ matrix.package }}
-      - name: List the .deb files built
-        run: |
-          ls -halp vyos-build/scripts/package-build/**/*.deb
-      - name: Upload the .deb files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: error
-          name: deb-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            vyos-build/scripts/package-build/${{ matrix.package }}/*.deb
-      - name: Upload the remaining build files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: build-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            vyos-build/scripts/package-build/**/*.buildinfo
-            vyos-build/scripts/package-build/**/*.changes
-            vyos-build/scripts/package-build/**/*.dsc
-            vyos-build/scripts/package-build/**/*debian.tar.*
-            vyos-build/scripts/package-build/**/*orig.tar.*
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        package: ${{ fromJson(needs.setup-matrix.outputs.package) }}
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-        exclude:
-          - arch: arm64
-            package: shim-signed
-      max-parallel: 8
-    timeout-minutes: 150
-  build-extra:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
-    name: Build (extra)
-    needs: [setup-matrix]
-    permissions:
-      packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - id: checkout
-        name: Checkout the package repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: packages/${{ matrix.package }}
-          ref: rolling
-          repository: vyos/${{ matrix.package }}
-      - if: ${{ matrix.deps }}
-        name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ${{ matrix.deps }}
-      - name: Build the package
-        run: |
-          sudo apt-get update
-          dpkg-buildpackage --build=binary --post-clean --unsigned-changes --unsigned-source
-        working-directory: packages/${{ matrix.package }}
-      - name: List the .deb files built
-        run: |
-          ls -halp packages/*.deb
-      - name: Upload the .deb files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: error
-          name: deb-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            packages/*.deb
-      - name: Upload the remaining build files as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: build-${{ matrix.package }}-${{ matrix.arch }}
-          path: |
-            packages/*.buildinfo
-            packages/*.changes
-            packages/*.dsc
-            packages/*debian.tar.*
-            packages/*orig.tar.*
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        deps: ${{ fromJson(needs.setup-matrix.outputs.deps) }}
-        package: ${{ fromJson(needs.setup-matrix.outputs.package-extra) }}
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-      max-parallel: 4
-  verify:
-    container:
-      env:
-        TZ: Australia/Brisbane
-      image: ghcr.io/techbymatt/vyos-build:rolling
-      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
-    defaults:
-      run:
-        shell: bash
-    name: Verify
-    needs:
-      - build
-      - build-extra
-    permissions:
-      packages: read
-    runs-on: ${{ matrix.runner_label }}
-    steps:
-      - name: Download the .deb file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages
-          pattern: deb-*-${{ matrix.arch }}
-      - name: Verify the .deb files can be installed
-        run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install apt-utils
-          shopt -s globstar nullglob
-          packages=(./packages/**/*.deb)
-          if ((${#packages[@]} == 0)); then
-            echo "No .deb files found" >&2
-            exit 1
-          fi
-          excluded_packages=(
-            strongswan-charon
-            strongswan-charon-dbgsym
-          )
-
-          repository="$(mktemp -d)"
-          chmod 755 "$repository"
-          source_list=/etc/apt/sources.list.d/vyos-package-verification.list
-          preferences=/etc/apt/preferences.d/vyos-package-verification
-          cleanup() {
-            sudo rm -f "$source_list" "$preferences"
-            rm -rf "$repository"
-          }
-          trap cleanup EXIT
-
-          package_index=0
-          for package in "${packages[@]}"; do
-            ln -s "$(realpath "$package")" "$repository/$package_index.deb"
-            package_index=$((package_index + 1))
-          done
-          (
-            cd "$repository"
-            apt-ftparchive packages . > Packages
-            apt-ftparchive \
-              -o APT::FTPArchive::Release::Origin=VyOS-Verification \
-              -o APT::FTPArchive::Release::Label=VyOS-Verification \
-              release . > Release
-          )
-          printf 'deb [trusted=yes] file:%s ./\n' "$repository" \
-            | sudo tee "$source_list" >/dev/null
-          printf '%s\n' \
-            'Package: *' \
-            'Pin: release o=VyOS-Verification' \
-            'Pin-Priority: 1001' \
-            | sudo tee "$preferences" >/dev/null
-          sudo apt-get -o APT::Sandbox::User=root update
-
-          for package in "${packages[@]}"; do
-            package_name="$(dpkg-deb --field "$package" Package)"
-            package_version="$(dpkg-deb --field "$package" Version)"
-            if [[ " ${excluded_packages[*]} " == *" $package_name "* ]]; then
-              continue
-            fi
-            sudo apt-get -o APT::Sandbox::User=root \
-              -o Dpkg::Options::=--force-confdef \
-              -o Dpkg::Options::=--force-confold \
-              --no-install-recommends --allow-downgrades --reinstall --yes install \
-              "$package_name=$package_version"
-          done
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner_label: ubuntu-24.04
-          - arch: arm64
-            runner_label: ubuntu-24.04-arm
-    timeout-minutes: 30
-  publish:
-    name: Publish
-    if: ${{ !cancelled() && needs.setup-matrix.result == 'success' && (needs.build.result == 'success' || needs.build-extra.result == 'success') }}
-    needs:
-      - build
-      - build-extra
-      - setup-matrix
-      - verify
-    permissions:
-      id-token: write
-      pages: write
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout the vyos-pkg repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Download the .deb file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages/rolling
-          pattern: deb-*
-      - name: Download the build file artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          merge-multiple: true
-          path: packages/rolling
-          pattern: build-*
-      - name: Install required packages
-        run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install \
-            jq \
-            createrepo-c \
-            coreutils \
-            gnupg2 \
-            dpkg-dev
-      - name: Insert environment variables
-        run: |
-          {
-            echo GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
-            echo REPO_OWNER="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f1)"
-            echo REPO_NAME="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f2)"
-          } >> "$GITHUB_ENV"
-      - id: import_gpg
-        name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Confirm GPG key is loaded
-        run: |
-          gpg --list-keys | grep "${{ steps.import_gpg.outputs.fingerprint }}"
-      - name: Setup Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - name: Build with Jekyll
-        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
-      - name: Build .deb repository
-        run: |
-          export GPG_FINGERPRINT="${{ steps.import_gpg.outputs.fingerprint }}"
-          export ORIGIN="${{ steps.import_gpg.outputs.name }}"
-          sudo chown -R "$(whoami):$(whoami)" _site/
-          scripts/build_repo.sh
-      - name: Delete scripts/ repo
-        run: |
-          rm -r scripts
-      - name: Generate directory indices
-        uses: gacts/directory-listing@dbce3ff489d0e8689b0c45c6a63fe28b2a23ca66 # v1.0.6
-        with:
-          show-hidden: true
-          target: _site/deb
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-    timeout-minutes: 30
 name: Test
 on:
   workflow_dispatch:
     inputs:
       deps:
-        description: A comma-separated list of dependency packages to be installed into the vyos-build container
+        description: A comma-separated list of dependency packages to install for standalone builds
         required: false
         type: string
       package:
-        description: A comma-separated list of packages to be built using the vyos-build container
+        description: A comma-separated list of recipe source packages
         required: false
         type: string
       package-extra:
-        description: A comma-separated list of packages from outside the vyos-build repository to be built using the vyos-build container
+        description: A comma-separated list of standalone source packages
         required: false
         type: string
 permissions:
   contents: read
+jobs:
+  setup-matrix:
+    name: Setup matrix
+    outputs:
+      build-matrix: ${{ steps.plan.outputs.build-matrix }}
+      build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
+      verify-arches: ${{ steps.plan.outputs.verify-arches }}
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout build tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - id: plan
+        name: Plan requested builds
+        env:
+          PACKAGES: ${{ inputs.package }}
+          EXTRA_PACKAGES: ${{ inputs.package-extra }}
+          DEPS: ${{ inputs.deps }}
+        run: |
+          python3 scripts/plan_builds.py test --packages "$PACKAGES" --extra-packages "$EXTRA_PACKAGES" --deps "$DEPS" >> "$GITHUB_OUTPUT"
+    timeout-minutes: 5
+  build:
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-matrix).include[0] != null }}
+    needs: [setup-matrix]
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/build-recipe.yaml
+    with:
+      matrix: ${{ needs.setup-matrix.outputs.build-matrix }}
+      image: ghcr.io/techbymatt/vyos-build:rolling
+      build-ref: ""
+      cache: false
+      max-parallel: 8
+    secrets: inherit
+  build-extra:
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-extra-matrix).include[0] != null }}
+    needs: [setup-matrix]
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/build-standalone.yaml
+    with:
+      matrix: ${{ needs.setup-matrix.outputs.build-extra-matrix }}
+      image: ghcr.io/techbymatt/vyos-build:rolling
+      build-ref: rolling
+      cache: false
+  verify:
+    if: ${{ !cancelled() && fromJSON(needs.setup-matrix.outputs.verify-arches || '[]')[0] != null && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
+    needs:
+      - setup-matrix
+      - build
+      - build-extra
+    uses: ./.github/workflows/verify-packages.yaml
+    with:
+      architectures: ${{ needs.setup-matrix.outputs.verify-arches }}
