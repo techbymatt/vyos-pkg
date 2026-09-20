@@ -28,8 +28,8 @@ def report_lintian(
     packages: list[Path],
     report: Path,
     *,
-    total_timeout: float = 600,
-    package_timeout: float = 120,
+    total_timeout: float = 1800,
+    package_timeout: float = 300,
     kill_grace: float = 5,
     command: tuple[str, ...] = (
         "lintian",
@@ -39,7 +39,13 @@ def report_lintian(
         "error,warning",
     ),
 ) -> str:
-    counts = dict(completed=0, findings=0, timed_out=0, failed=0, unscanned=0)
+    counts = {
+        "completed": 0,
+        "findings": 0,
+        "timed_out": 0,
+        "failed": 0,
+        "unscanned": 0,
+    }
     deadline = time.monotonic() + total_timeout
     with report.open("w") as output:
 

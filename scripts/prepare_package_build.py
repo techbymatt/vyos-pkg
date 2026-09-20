@@ -121,8 +121,10 @@ def prepare_udp_packaging(directory: Path) -> None:
             "# Build architecture-dependent files here.\nbinary-arch: build install\n",
         ),
         (
-            "# Build architecture-dependent files here.\nbinary-arch: build install\n"
-            "# This is an architecture independent package\n# so; we have nothing to do by default.\n",
+            (
+                "# Build architecture-dependent files here.\nbinary-arch: build install\n"
+                "# This is an architecture independent package\n# so; we have nothing to do by default.\n"
+            ),
             "# No architecture-independent packages are produced.\nbinary-indep:\n",
         ),
         ("binary: binary-indep\n", "binary: binary-arch binary-indep\n"),
