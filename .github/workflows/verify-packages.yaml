@@ -50,7 +50,7 @@ jobs:
       - name: Report Lintian advisories
         timeout-minutes: 60
         run: |
-          python3 scripts/report_lintian.py --artifacts packages --report lintian-report.txt --total-timeout 1800 --package-timeout 300
+          python3 scripts/report_lintian.py --artifacts packages --report lintian-report.txt --total-timeout 3600 --package-timeout 300
       - name: Upload Lintian report
         if: ${{ always() && hashFiles('lintian-report.txt') != '' }}
         continue-on-error: true
