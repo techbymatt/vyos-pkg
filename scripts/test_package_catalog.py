@@ -12,7 +12,10 @@ except ImportError:
 
 
 class CatalogTests(unittest.TestCase):
+    """Tests for catalog loading and strict validation."""
+
     def test_catalog_preserves_publish_sources(self) -> None:
+        """Catalog groups keep their pinned source names and dependencies."""
         sources = catalog.load_catalog()
         self.assertEqual(
             [entry["name"] for entry in sources["build"]],
@@ -82,6 +85,7 @@ class CatalogTests(unittest.TestCase):
         )
 
     def test_architecture_distinctions_and_unknown_sources(self) -> None:
+        """Architecture policies are per source and group, with dual defaults."""
         self.assertEqual(
             catalog.architecture_policy("build", "pyhumps"), "independent_only"
         )
@@ -97,6 +101,7 @@ class CatalogTests(unittest.TestCase):
         )
 
     def test_invalid_catalog_entries_fail_closed(self) -> None:
+        """Malformed or unsafe entries, duplicates, and missing groups raise."""
         for entry in (
             {"name": "../escape"},
             {"name": "valid", "architecture": "arm64"},
@@ -120,6 +125,7 @@ class CatalogTests(unittest.TestCase):
             )
 
     def test_validation_returns_normalized_copy(self) -> None:
+        """Validation fills defaults without mutating the original input."""
         original = {"build": [{"name": "valid"}], "build-extra": []}
         before = copy.deepcopy(original)
         normalized = catalog.validate_catalog(original)
@@ -130,6 +136,7 @@ class CatalogTests(unittest.TestCase):
         )
 
     def test_duplicate_json_keys_rejected(self) -> None:
+        """Duplicate JSON keys in the catalog file raise ValueError."""
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "catalog.json"
             path.write_text('{"build": [], "build": [], "build-extra": []}')

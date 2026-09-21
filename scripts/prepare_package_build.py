@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
+    """Rewrite the file, failing unless the audited command occurs exactly once."""
     text = path.read_text()
     if text.count(old) != 1:
         raise ValueError(f"{path}: expected exactly one audited command {old!r}")
@@ -21,6 +22,7 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 
 def prepare(root: Path, package: str, arch: str) -> None:
+    """Apply audited build-mode adaptations to one package recipe and builders."""
     # The default builder includes source packages; retain that behavior.
     mode = "full" if arch == "amd64" else "source,any"
     replace_once(
@@ -203,6 +205,7 @@ def prepare_extra(root: Path, package: str) -> None:
 
 
 def main() -> int:
+    """Parse --root, --package, --arch and --group, then apply the adaptations."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--package", required=True)

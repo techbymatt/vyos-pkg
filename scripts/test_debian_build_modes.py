@@ -29,7 +29,10 @@ except ImportError:
     "requires Debian dpkg-dev and make",
 )
 class DebianBuildModeTests(unittest.TestCase):
+    """Real dpkg-buildpackage mode checks on a Debian build host."""
+
     def test_udp_patch_repairs_native_binary_build(self) -> None:
+        """The UDP patch lets binary and any native builds produce a .deb."""
         native = subprocess.check_output(
             ["dpkg", "--print-architecture"], text=True
         ).strip()
@@ -64,6 +67,7 @@ class DebianBuildModeTests(unittest.TestCase):
                 policy.check_outputs("build", "udp-broadcast-relay", native, root)
 
     def test_legacy_arch_package_requires_repaired_binary_target(self) -> None:
+        """Legacy arch rules build the binary target only after preparation."""
         native = subprocess.check_output(
             ["dpkg", "--print-architecture"], text=True
         ).strip()
@@ -116,6 +120,7 @@ class DebianBuildModeTests(unittest.TestCase):
                 policy.check_outputs("build-extra", "vyatta-biosdevname", native, root)
 
     def test_mixed_source_builds_independent_package_only_in_binary_mode(self) -> None:
+        """binary builds arch-all packages too; any builds only native ones."""
         native = subprocess.check_output(
             ["dpkg", "--print-architecture"], text=True
         ).strip()

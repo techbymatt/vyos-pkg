@@ -35,6 +35,7 @@ RESTORE_BATCH_SIZE = 8
 
 
 def runner_label(arch: str) -> str:
+    """GitHub Actions runner label for a package architecture."""
     return "ubuntu-26.04" if arch == "amd64" else "ubuntu-26.04-arm"
 
 
@@ -52,6 +53,7 @@ def parse_input(raw: str, *, dependency: bool = False) -> list[str]:
 def plan_test(
     packages: str, extra_packages: str, deps: str, sources: dict | None = None
 ) -> dict:
+    """Build the Test job matrices and verification architectures from inputs."""
     sources = catalog.load_catalog() if sources is None else sources
     dependencies = " ".join(parse_input(deps, dependency=True))
     selected = {
@@ -81,6 +83,7 @@ def plan_test(
 
 
 def source_records(sources: dict, revisions: dict[tuple[str, str], str]) -> list[dict]:
+    """Expand catalog sources into per-architecture records with resolved commits."""
     records = []
     for group in catalog.GROUPS:
         for source in sources[group]:
@@ -118,6 +121,7 @@ def plan_publish(
     changed: bool = True,
     force_rebuild: bool = False,
 ) -> dict:
+    """Route records into build and restore matrices, batching cache hits per runner."""
     result = {
         name: {"include": []}
         for name in ("build-matrix", "build-extra-matrix", "restore-matrix")
@@ -160,6 +164,7 @@ def plan_publish(
 def publication_changed(
     current: dict, published: object, force_rebuild: bool = False
 ) -> bool:
+    """Whether the current manifest differs from the deployed one, or refresh forced."""
     if force_rebuild or published is None:
         return True
     try:
@@ -169,14 +174,17 @@ def publication_changed(
 
 
 def command_output(arguments: list[str], cwd: Path | None = None) -> str:
+    """Run a command and return its stripped stdout."""
     return subprocess.check_output(arguments, cwd=cwd, text=True).strip()
 
 
 def git(root: Path, *arguments: str) -> str:
+    """Run a git command in a repository and return its stripped stdout."""
     return command_output(["git", *arguments], cwd=root)
 
 
 def resolve_revisions(patch_root: Path, sources: dict) -> dict[tuple[str, str], str]:
+    """Resolve each source commit from the patched submodule or upstream remote."""
     revisions = {}
     for group in catalog.GROUPS:
         for source in sources[group]:
@@ -214,6 +222,7 @@ def resolve_revisions(patch_root: Path, sources: dict) -> dict[tuple[str, str], 
 
 
 def fetch_caches(repository: str, ref: str) -> list[str]:
+    """List cache keys visible to the workflow restore, newest first, via gh api."""
     default_branch = command_output(
         ["gh", "api", f"repos/{repository}", "--jq", ".default_branch"]
     )
@@ -236,6 +245,7 @@ def fetch_caches(repository: str, ref: str) -> list[str]:
 
 
 def fetch_published(repository: str, run: str) -> object:
+    """Load the deployed manifest from Pages, or None when unavailable or invalid."""
     try:
         url = command_output(
             ["gh", "api", f"repos/{repository}/pages", "--jq", ".html_url"]
@@ -277,6 +287,7 @@ def fetch_published(repository: str, run: str) -> object:
 
 
 def run_publish(args: argparse.Namespace) -> dict:
+    """Plan publish inputs and matrices, writing input-manifest.json."""
     sources = catalog.load_catalog(args.workflow_root / "scripts/package_catalog.json")
     patch_commit = git(args.patch_root, "rev-parse", "HEAD")
     shared = git(
@@ -329,6 +340,7 @@ def run_publish(args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI status: 0 success, 1 failure; stdout holds only GITHUB_OUTPUT lines."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     test = commands.add_parser("test")

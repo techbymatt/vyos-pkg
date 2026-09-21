@@ -40,7 +40,10 @@ EXCLUDED_INPUTS = (
 
 
 class NamespaceTests(unittest.TestCase):
+    """Whole-file hashing scope and CLI behavior for build inputs."""
+
     def setUp(self) -> None:
+        """Creates a workflow tree containing every build input file."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.workflow = Path(temporary.name)
@@ -50,9 +53,11 @@ class NamespaceTests(unittest.TestCase):
             target.write_bytes(b"whole file fixture\n")
 
     def namespace(self) -> str:
+        """Computes the namespace over the fixture workflow."""
         return cn.namespace(*INPUTS, self.workflow)
 
     def cli(self, root: Path) -> subprocess.CompletedProcess:
+        """Runs the cache_namespace CLI against a workflow root."""
         return subprocess.run(
             [
                 sys.executable,
@@ -74,9 +79,11 @@ class NamespaceTests(unittest.TestCase):
         )
 
     def test_explicit_build_input_contract(self) -> None:
+        """The module's BUILD_INPUTS matches the test's declared inputs."""
         self.assertEqual(tuple(map(str, cn.BUILD_INPUTS)), BUILD_INPUTS)
 
     def test_each_whole_input_invalidates_caches(self) -> None:
+        """Prepending or appending bytes to any input changes the hash."""
         before = self.namespace()
         for relative in BUILD_INPUTS:
             with self.subTest(path=relative):
@@ -89,6 +96,7 @@ class NamespaceTests(unittest.TestCase):
         self.assertEqual(self.namespace(), before)
 
     def test_each_missing_input_is_rejected(self) -> None:
+        """Deleting any build input fails both the API and the CLI."""
         for relative in BUILD_INPUTS:
             with self.subTest(path=relative):
                 target = self.workflow / relative
@@ -103,6 +111,7 @@ class NamespaceTests(unittest.TestCase):
                 target.write_bytes(original)
 
     def test_orchestration_verification_publication_docs_are_excluded(self) -> None:
+        """Editing excluded orchestration, docs, and verify files is ignored."""
         before = self.namespace()
         for relative in EXCLUDED_INPUTS:
             with self.subTest(path=relative):
@@ -114,6 +123,7 @@ class NamespaceTests(unittest.TestCase):
                 self.assertEqual(self.namespace(), before)
 
     def test_each_external_input_changes_the_namespace(self) -> None:
+        """Changing any explicit argument changes the namespace."""
         for index in range(len(INPUTS)):
             with self.subTest(index=index):
                 values = list(INPUTS)
@@ -123,6 +133,7 @@ class NamespaceTests(unittest.TestCase):
                 )
 
     def test_file_boundaries_are_preserved(self) -> None:
+        """Moving bytes between files changes the hash."""
         first, second = (self.workflow / path for path in BUILD_INPUTS[:2])
         first.write_bytes(b"ab")
         second.write_bytes(b"c")
@@ -132,11 +143,13 @@ class NamespaceTests(unittest.TestCase):
         self.assertNotEqual(self.namespace(), before)
 
     def test_cli_prints_the_namespace(self) -> None:
+        """The CLI prints exactly the namespace hash."""
         result = self.cli(self.workflow)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, self.namespace() + "\n")
 
     def test_real_checkout_hashing(self) -> None:
+        """The CLI hashes the real checkout like the direct call."""
         root = Path(cn.__file__).resolve().parent.parent
         result = self.cli(root)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -145,12 +158,16 @@ class NamespaceTests(unittest.TestCase):
 
 
 class JobTextCompatibilityTests(unittest.TestCase):
+    """Text-based job block extraction from workflow files."""
+
     def test_job_boundaries_and_last_job(self) -> None:
+        """job_text slices each job block, including the last one."""
         workflow = "jobs:\n  build:\n    steps: []\n  verify:\n    steps: []\n"
         self.assertEqual(cn.job_text(workflow, "build"), "  build:\n    steps: []\n")
         self.assertEqual(cn.job_text(workflow, "verify"), "  verify:\n    steps: []\n")
 
     def test_missing_job_is_rejected(self) -> None:
+        """job_text raises ValueError for unknown job names."""
         with self.assertRaisesRegex(ValueError, "job not found: publish"):
             cn.job_text("jobs:\n  build:\n    steps: []\n", "publish")
 

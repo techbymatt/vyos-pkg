@@ -18,10 +18,12 @@ except ImportError:
 
 
 def independent_only(group: str, package: str) -> bool:
+    """Report whether the source is classified independent_only."""
     return architecture_policy(group, package) == "independent_only"
 
 
 def check_outputs(group: str, package: str, arch: str, directory: Path) -> None:
+    """Verify each .deb in directory has an Architecture allowed by policy."""
     if arch not in architectures(group, package):
         raise ValueError(f"{group}/{package}: no {arch} build is planned")
     paths = sorted(directory.glob("*.deb"))
@@ -41,6 +43,7 @@ def check_outputs(group: str, package: str, arch: str, directory: Path) -> None:
 
 
 def main() -> int:
+    """CLI architectures/check subcommands; status: 0 success, 1 failure."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     arches = sub.add_parser("architectures")

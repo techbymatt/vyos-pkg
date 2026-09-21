@@ -67,6 +67,7 @@ binary: binary-indep
 
 
 def udp_patch(rules: str = LEGACY_UDP_RULES) -> str:
+    """Build the fixture Debian-packaging patch for udp-broadcast-relay."""
     control = (
         "Source: udp-broadcast-relay\nSection: net\nPriority: optional\n"
         "Maintainer: Tester <test@example.org>\nRules-Requires-Root: no\n\n"
@@ -93,6 +94,7 @@ def udp_patch(rules: str = LEGACY_UDP_RULES) -> str:
 
 
 def write_udp_recipe(root: Path, patch: str) -> Path:
+    """Write a minimal udp-broadcast-relay recipe and return the patch path."""
     directory = root / "udp-broadcast-relay"
     patches = directory / "patches/udp-broadcast-relay"
     patches.mkdir(parents=True)
@@ -106,7 +108,10 @@ def write_udp_recipe(root: Path, patch: str) -> Path:
 
 
 class UdpPrepareTests(unittest.TestCase):
+    """Tests for the udp-broadcast-relay packaging adaptation."""
+
     def test_adapted_patch_applies_and_selects_native_packaging(self) -> None:
+        """The rewritten patch applies and picks native dpkg packaging per arch."""
         for arch, mode in (("amd64", "binary"), ("arm64", "any")):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -132,6 +137,7 @@ class UdpPrepareTests(unittest.TestCase):
                 self.assertTrue((source / "debian/rules").stat().st_mode & 0o111)
 
     def test_patch_drift_fails_without_modifying_patch(self) -> None:
+        """Unexpected patch variants fail without editing the patch file."""
         original = udp_patch()
         variants = (
             original.replace("Architecture: linux-any", "Architecture: all"),
@@ -155,7 +161,10 @@ class UdpPrepareTests(unittest.TestCase):
 
 
 class ExtraPrepareTests(unittest.TestCase):
+    """Tests for build-extra sources that bypass the shared builder."""
+
     def setUp(self) -> None:
+        """Create a scratch tree with a legacy vyatta-biosdevname recipe."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -168,6 +177,7 @@ class ExtraPrepareTests(unittest.TestCase):
         self.rules.write_text(LEGACY_BIOSDEVNAME_RULES)
 
     def test_cli_handles_extra_sources_without_shared_builder(self) -> None:
+        """The CLI adapts extra sources without invoking the shared builder."""
         for arch in ("amd64", "arm64"):
             with self.subTest(arch=arch):
                 self.rules.write_text(LEGACY_BIOSDEVNAME_RULES)
@@ -196,10 +206,12 @@ class ExtraPrepareTests(unittest.TestCase):
                 self.assertNotIn("independent package\n# so;", result)
 
     def test_other_extra_packages_are_untouched(self) -> None:
+        """Preparing an unrelated extra source leaves other recipes untouched."""
         prepare.prepare_extra(self.root, "live-boot")
         self.assertEqual(self.rules.read_text(), LEGACY_BIOSDEVNAME_RULES)
 
     def test_rule_drift_fails_without_partial_edits(self) -> None:
+        """Drifted rules fail without partially editing them."""
         for changed in (
             LEGACY_BIOSDEVNAME_RULES.replace(
                 "binary-arch: build install", "binary-arch: install"
@@ -216,6 +228,7 @@ class ExtraPrepareTests(unittest.TestCase):
                 self.assertEqual(self.rules.read_text(), changed)
 
     def test_control_drift_fails_without_edits(self) -> None:
+        """Unexpected control content fails without editing the recipe."""
         for control in (
             "Package: vyatta-biosdevname\nArchitecture: all\n",
             "Package: vyatta-biosdevname\nArchitecture: any\n\nPackage: new-data\nArchitecture: all\n",
@@ -230,7 +243,10 @@ class ExtraPrepareTests(unittest.TestCase):
 
 
 class PrepareTests(unittest.TestCase):
+    """Tests for shared-builder recipe adaptations."""
+
     def setUp(self) -> None:
+        """Create a scratch root containing the shared build.py."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -239,6 +255,7 @@ class PrepareTests(unittest.TestCase):
         )
 
     def recipe(self, package: str, command: str) -> Path:
+        """Write a package.toml recipe stub for a package."""
         directory = self.root / package
         directory.mkdir()
         path = directory / "package.toml"
@@ -246,6 +263,7 @@ class PrepareTests(unittest.TestCase):
         return path
 
     def test_arm64_net_snmp_excludes_independent_outputs(self) -> None:
+        """arm64 net-snmp drops independent outputs and builds source,any."""
         path = self.recipe(
             "net-snmp", 'build_cmd = "dpkg-buildpackage -us -uc -tc -b || true"\n'
         )
@@ -257,6 +275,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("--build=source,any", (self.root / "build.py").read_text())
 
     def test_amd64_retains_independent_outputs(self) -> None:
+        """amd64 keeps independent outputs and full binary builds."""
         path = self.recipe(
             "net-snmp", 'build_cmd = "dpkg-buildpackage -us -uc -tc -b || true"\n'
         )
@@ -265,6 +284,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("--build=full", (self.root / "build.py").read_text())
 
     def test_vici_is_not_built_on_arm64(self) -> None:
+        """The vici build step is stripped from arm64 strongswan builds."""
         path = self.recipe(
             "strongswan",
             "dpkg-buildpackage -uc -us -tc -b -d\ncd ..; ./build-vici.sh\n",
@@ -274,6 +294,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("--build=any -d", path.read_text())
 
     def test_libyang_uses_rendered_source_with_explicit_binary_mode(self) -> None:
+        """apkg builds are rewritten to a rendered source with explicit binary mode."""
         path = self.recipe(
             "frr",
             'build_cmd = "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} +"\n'
@@ -287,6 +308,7 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("apkg build -i", command)
 
     def test_unrecognized_recipe_change_fails(self) -> None:
+        """Unrecognized recipe commands fail instead of being edited."""
         self.recipe("net-snmp", 'build_cmd = "different command"\n')
         with self.assertRaisesRegex(ValueError, "expected exactly one audited command"):
             prepare.prepare(self.root, "net-snmp", "arm64")
@@ -296,7 +318,10 @@ class PrepareTests(unittest.TestCase):
     os.environ.get("VYOS_BUILD_ROOT"), "optional upstream recipe checkout"
 )
 class UpstreamRecipeTests(unittest.TestCase):
+    """Optional audit of adaptations against a real VyOS checkout."""
+
     def test_audited_adaptations_apply_to_real_recipes(self) -> None:
+        """All audited adaptations apply cleanly to real upstream recipes."""
         source = Path(os.environ["VYOS_BUILD_ROOT"])
         packages = (
             "dropbear",

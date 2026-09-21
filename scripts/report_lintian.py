@@ -39,6 +39,7 @@ def report_lintian(
         "error,warning",
     ),
 ) -> str:
+    """Scan each package under per-package and overall budgets, writing the report."""
     counts = {
         "completed": 0,
         "findings": 0,
@@ -50,6 +51,7 @@ def report_lintian(
     with report.open("w") as output:
 
         def log(message: str) -> None:
+            """Echo progress to stdout and the report file."""
             print(message, flush=True)
             output.write(message + "\n")
             output.flush()
@@ -106,6 +108,7 @@ def report_lintian(
 
 
 def positive_seconds(value: str) -> float:
+    """Argparse type rejecting non-finite or non-positive timeout values."""
     seconds = float(value)
     if not 0 < seconds < float("inf"):
         raise argparse.ArgumentTypeError("timeout must be finite and positive")
@@ -113,6 +116,7 @@ def positive_seconds(value: str) -> float:
 
 
 def main() -> None:
+    """Scan --artifacts and append the summary to GITHUB_STEP_SUMMARY when set."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--report", type=Path, default=Path("lintian-report.txt"))

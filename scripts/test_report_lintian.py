@@ -15,7 +15,10 @@ except ImportError:
 
 
 class ReportTests(unittest.TestCase):
+    """Subprocess-driven scanning with failures, timeouts, and cleanup."""
+
     def setUp(self):
+        """Create a temporary workspace."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -23,6 +26,7 @@ class ReportTests(unittest.TestCase):
         self.packages = [self.root / f"package {index}.deb" for index in range(3)]
 
     def scan(self, script, **kwargs):
+        """Run report_lintian with a stub command."""
         with redirect_stdout(io.StringIO()) as output:
             summary = rl.report_lintian(
                 self.packages,
@@ -34,6 +38,7 @@ class ReportTests(unittest.TestCase):
         return summary, output.getvalue(), self.report.read_text()
 
     def test_findings_are_completed_and_output_is_preserved(self):
+        """Findings are written to the report and warned on stdout."""
         summary, console, report = self.scan(
             "import sys; print('package finding'); sys.exit(2)"
         )
@@ -44,12 +49,14 @@ class ReportTests(unittest.TestCase):
         self.assertIn("START 3/3", console)
 
     def test_tool_errors_do_not_abort_remaining_packages(self):
+        """A failing package does not stop the remaining scans."""
         summary, _, report = self.scan("raise SystemExit(1)")
         self.assertIn("INCOMPLETE", summary)
         self.assertIn("failed=3", summary)
         self.assertIn("START 3/3", report)
 
     def test_package_timeout_preserves_partial_output_and_continues(self):
+        """A timed-out package keeps partial output and scanning continues."""
         summary, _, report = self.scan(
             "import time; print('partial output', flush=True); time.sleep(30)",
             package_timeout=0.2,
@@ -59,6 +66,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("START 3/3", report)
 
     def test_total_budget_limits_current_package_and_marks_rest_unscanned(self):
+        """The total deadline stops the current package and marks the rest unscanned."""
         start = time.monotonic()
         summary, _, report = self.scan("import time; time.sleep(30)", total_timeout=0.2)
         self.assertLess(time.monotonic() - start, 5)
@@ -67,6 +75,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"UNSCANNED {self.packages[2]}", report)
 
     def test_timeout_kills_descendant_that_ignores_term(self):
+        """Timeout kills process-group descendants that ignore SIGTERM."""
         marker = self.root / "child-survived"
         ready = self.root / "child-ready"
         child = (
@@ -88,6 +97,7 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(marker.exists(), "descendant survived process-group cleanup")
 
     def test_missing_lintian_is_reported(self):
+        """A missing command is reported as failed."""
         with redirect_stdout(io.StringIO()):
             summary = rl.report_lintian(
                 self.packages, self.report, command=(str(self.root / "missing"),)
@@ -96,6 +106,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("No such file", self.report.read_text())
 
     def test_empty_input_is_incomplete(self):
+        """No packages yields an INCOMPLETE summary."""
         self.packages = []
         summary, _, _ = self.scan("raise SystemExit(0)")
         self.assertIn("INCOMPLETE", summary)

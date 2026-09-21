@@ -13,7 +13,10 @@ except ImportError:
 
 
 class PolicyTests(unittest.TestCase):
+    """Tests for producer planning and output policy checks."""
+
     def test_independent_sources_have_one_producer(self) -> None:
+        """Independent-only sources plan a single amd64 producer."""
         for group, package in (
             ("build", "bash-completion"),
             ("build", "ddclient"),
@@ -26,6 +29,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(policy.architectures(group, package), ["amd64"])
 
     def test_mixed_and_arch_specific_sources_keep_native_builds(self) -> None:
+        """Mixed and unknown sources plan both arches; amd64-only stays native."""
         for package in ("net-snmp", "frr", "strongswan", "linux-kernel", "vyos-1x"):
             self.assertEqual(policy.architectures("build", package), ["amd64", "arm64"])
         self.assertEqual(policy.architectures("build", "shim-signed"), ["amd64"])
@@ -36,6 +40,7 @@ class PolicyTests(unittest.TestCase):
         )
 
     def test_output_policy_uses_control_metadata_not_filename(self) -> None:
+        """Output checks trust dpkg metadata and reject misleading filenames."""
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             (directory / "misleading_arm64.deb").write_bytes(b"fixture")
@@ -61,6 +66,7 @@ class PolicyTests(unittest.TestCase):
                 policy.check_outputs("build", "net-snmp", "amd64", directory)
 
     def test_empty_outputs_fail(self) -> None:
+        """Directories without .deb outputs are rejected."""
         with (
             tempfile.TemporaryDirectory() as temporary,
             self.assertRaisesRegex(ValueError, "no .deb outputs"),

@@ -25,6 +25,7 @@ FIELDS = ("Package", "Version", "Architecture", "Maintainer", "Description")
 
 
 def run_tool(command: list[str], output: BinaryIO | int = subprocess.PIPE) -> bytes:
+    """Run a dpkg tool, raising ValueError with its stderr on nonzero exit."""
     result = subprocess.run(command, stdout=output, stderr=subprocess.PIPE, check=False)
     if result.returncode:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
@@ -33,6 +34,7 @@ def run_tool(command: list[str], output: BinaryIO | int = subprocess.PIPE) -> by
 
 
 def safe_path(name: str) -> str:
+    """Reject absolute, parent-referring or NUL paths and normalize the rest."""
     if name.startswith("/") or ".." in name.split("/") or "\x00" in name:
         raise ValueError(f"unsafe archive path: {name!r}")
     return "/".join(part for part in name.split("/") if part not in ("", "."))
@@ -104,6 +106,7 @@ def read_archive(path: Path, option: str) -> tuple[dict[str, str], bytes | None]
 
 
 def verify_checksums(sums: bytes, digests: dict[str, str]) -> None:
+    """Check every md5sums entry against the computed member digests."""
     seen = set()
     for line in sums.decode("utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-fA-F]{32}) [ *](.+)", line)
@@ -121,6 +124,7 @@ def verify_checksums(sums: bytes, digests: dict[str, str]) -> None:
 
 
 def validate_packages(paths: list[Path], arch: str) -> None:
+    """Validate explicit .deb paths as one architecture, requiring at least one."""
     if arch not in ("amd64", "arm64") or not paths:
         raise ValueError("expected amd64 or arm64 and at least one .deb path")
     _validate_packages([(path, arch) for path in paths])
@@ -164,6 +168,7 @@ def validate_artifacts(
 
 
 def _validate_packages(packages: list[tuple[Path, str]]) -> None:
+    """Validate each package, rejecting identical identities with differing bytes."""
     seen: dict[tuple[str, str, str], str] = {}
     for original, arch in packages:
         try:
@@ -205,6 +210,7 @@ def _validate_packages(packages: list[tuple[Path, str]]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch the required --arch or --artifacts mode; return 1 on failure."""
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--arch", choices=("amd64", "arm64"))

@@ -72,6 +72,7 @@ def namespace(
     data_tree: str,
     workflow: Path,
 ) -> str:
+    """Hash caller-supplied trees plus the shared build surface into a digest."""
     digest = hashlib.sha256()
     for value in (
         build_image,
@@ -86,6 +87,7 @@ def namespace(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI status: 0 digest printed, 1 unreadable or invalid build inputs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-image", required=True)
     parser.add_argument("--patch-tree", required=True)

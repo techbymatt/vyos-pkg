@@ -13,6 +13,7 @@ DEPENDENCY_PATTERN = r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?(?:=[A-Za-z0-9.+:~_-]
 
 
 def validate_name(value: object, *, dependency: bool = False) -> str:
+    """Return value if it matches the source or dependency pattern; else raise."""
     pattern = DEPENDENCY_PATTERN if dependency else SOURCE_PATTERN
     if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
         raise ValueError(
@@ -22,6 +23,7 @@ def validate_name(value: object, *, dependency: bool = False) -> str:
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict:
+    """Object pairs hook for json that rejects duplicate keys."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -31,6 +33,7 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict:
 
 
 def validate_catalog(value: object) -> dict[str, list[dict]]:
+    """Validate parsed catalog JSON; return normalized build/build-extra entries."""
     if not isinstance(value, dict) or set(value) != set(GROUPS):
         raise ValueError("catalog must contain build and build-extra")
     result = {}
@@ -66,12 +69,14 @@ def validate_catalog(value: object) -> dict[str, list[dict]]:
 
 
 def load_catalog(path: Path = CATALOG_PATH) -> dict[str, list[dict]]:
+    """Read and validate the catalog JSON at path."""
     return validate_catalog(
         json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     )
 
 
 def architecture_policy(group: str, package: str, catalog: dict | None = None) -> str:
+    """Return the source's architecture policy, defaulting to dual if unlisted."""
     if group not in GROUPS:
         raise ValueError(f"invalid package group: {group}")
     validate_name(package)
@@ -84,6 +89,7 @@ def architecture_policy(group: str, package: str, catalog: dict | None = None) -
 
 
 def architectures(group: str, package: str, catalog: dict | None = None) -> list[str]:
+    """Map policy to targets: dual yields amd64 plus arm64, otherwise amd64 only."""
     if architecture_policy(group, package, catalog) == "dual":
         return ["amd64", "arm64"]
     return ["amd64"]

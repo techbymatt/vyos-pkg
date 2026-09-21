@@ -19,6 +19,8 @@ from typing import TypedDict
 
 
 class Package(TypedDict):
+    """One per-architecture package record within a manifest."""
+
     group: str
     package: str
     arch: str
@@ -27,6 +29,8 @@ class Package(TypedDict):
 
 
 class Manifest(TypedDict):
+    """Record of publish inputs deployed for one manifest version."""
+
     schema_version: int
     repository_commit: str
     patch_commit: str
@@ -41,12 +45,14 @@ PACKAGE_NAME = r"[a-z0-9][a-z0-9_+.-]*"
 
 
 def require_pattern(value: object, pattern: str, field: str) -> str:
+    """Return value if it fully matches pattern, else raise ValueError naming field."""
     if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
         raise ValueError(f"invalid {field}")
     return value
 
 
 def package_identity(package: Package) -> tuple[str, str, str]:
+    """Return the (group, package, arch) tuple identifying a package."""
     return package["group"], package["package"], package["arch"]
 
 
@@ -136,6 +142,7 @@ def create_manifest(
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """JSON object_pairs_hook rejecting duplicate keys."""
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -152,6 +159,7 @@ def load_manifest(path: Path) -> Manifest:
 
 
 def canonical_bytes(manifest: Manifest) -> bytes:
+    """Serialize a validated manifest to canonical UTF-8 JSON bytes."""
     return (
         json.dumps(
             validate_manifest(manifest),

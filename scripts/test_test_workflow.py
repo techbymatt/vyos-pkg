@@ -18,7 +18,10 @@ ACTIONS = ROOT / ".github/actions"
 
 
 class TestWorkflowTests(unittest.TestCase):
+    """Workflow and action contracts shared by manual and publication runs."""
+
     def test_callers_share_build_implementations_and_choose_cache_policy(self):
+        """Test and publish call reusable builds with different cache policy."""
         for caller, cached in (("test", "false"), ("publish", "true")):
             workflow = (WORKFLOWS / f"{caller}.yaml").read_text()
             for job, reusable in (("build", "recipe"), ("build-extra", "standalone")):
@@ -33,6 +36,7 @@ class TestWorkflowTests(unittest.TestCase):
                     self.assertNotIn("steps:", text)
 
     def test_planners_receive_raw_inputs_and_publication_context(self):
+        """Planners receive raw inputs plus publication context."""
         test = job_text((WORKFLOWS / "test.yaml").read_text(), "setup-matrix")
         for env, name in (
             ("PACKAGES", "package"),
@@ -63,6 +67,7 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn("workflow/input-manifest.json", publish)
 
     def test_native_builds_apply_policy_before_execution(self):
+        """Reusable build workflows order policy steps before the build."""
         for name in ("recipe", "standalone"):
             text = (WORKFLOWS / f"build-{name}.yaml").read_text()
             self.assertIn("runs-on: ${{ matrix.runner_label }}", text)
@@ -91,6 +96,7 @@ class TestWorkflowTests(unittest.TestCase):
                 self.assertIn("matrix.commit || inputs.build-ref", text)
 
     def test_shared_output_policy_precedes_both_uploads(self):
+        """Artifact uploads run after the output policy check."""
         text = (ACTIONS / "package-artifacts/action.yaml").read_text()
         check = text.index("package_build_policy.py check")
         self.assertLess(check, text.index("name: Upload the .deb"))
@@ -106,6 +112,7 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn("fail-on-cache-miss: true", restore)
 
     def test_path_contract_matches_legacy_cache_order(self):
+        """package-paths emits the legacy cache order for each group."""
         text = (ACTIONS / "package-paths/action.yaml").read_text()
         script = textwrap.dedent(text.split("      run: |\n", 1)[1])
         for group in ("build", "build-extra"):
@@ -147,6 +154,7 @@ class TestWorkflowTests(unittest.TestCase):
                 )
 
     def test_restore_keeps_eight_native_slots(self):
+        """Restore jobs keep all eight native matrix slots."""
         text = job_text((WORKFLOWS / "publish.yaml").read_text(), "restore-cached")
         self.assertIn("runs-on: ${{ matrix.runner_label }}", text)
         for slot in range(8):
@@ -156,6 +164,7 @@ class TestWorkflowTests(unittest.TestCase):
         )
 
     def test_combined_verification_preserves_producer_directories(self):
+        """Verification downloads keep producer directories intact."""
         for name in ("test", "publish"):
             text = job_text((WORKFLOWS / f"{name}.yaml").read_text(), "verify")
             self.assertIn("uses: ./.github/workflows/verify-packages.yaml", text)
@@ -184,6 +193,7 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", verify)
 
     def test_publication_requires_successful_verification(self):
+        """Publish gates on a successful verify job."""
         text = job_text((WORKFLOWS / "publish.yaml").read_text(), "publish")
         self.assertIn("needs.verify.result == 'success'", text)
         self.assertIn("      - verify\n", text)

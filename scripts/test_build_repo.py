@@ -56,7 +56,10 @@ else:
 
 
 class BuildRepoTests(unittest.TestCase):
+    """Tests for the build_repo.sh assembly script."""
+
     def setUp(self):
+        """Creates a disposable fixture tree and fake tool environment."""
         self.temp = tempfile.TemporaryDirectory(prefix="build-repo-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -117,6 +120,7 @@ class BuildRepoTests(unittest.TestCase):
             tool.chmod(0o755)
 
     def run_build(self, **env):
+        """Runs build_repo.sh in the fixture with environment overrides."""
         return subprocess.run(
             [str(SCRIPT)],
             check=False,
@@ -128,17 +132,20 @@ class BuildRepoTests(unittest.TestCase):
         )
 
     def calls(self):
+        """Returns the logged fake tool invocations."""
         return [
             json.loads(line)
             for line in (self.root / "tools.jsonl").read_text().splitlines()
         ]
 
     def assert_failed(self, result, message):
+        """Asserts nonzero exit, expected message, and no success text."""
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(message, result.stderr)
         self.assertNotIn("successfully", result.stdout)
 
     def test_success_layout_compression_hashes_and_signatures(self):
+        """A good build moves packages and writes hashed, signed indexes."""
         result = self.run_build(GPG_KEY_ID="must-not-win")
         self.assertEqual(result.returncode, 0, result.stderr)
         repo = self.site / "deb"
@@ -207,6 +214,7 @@ class BuildRepoTests(unittest.TestCase):
             )
 
     def test_owner_and_key_fallbacks(self):
+        """Empty owner and fingerprint fall back to ORIGIN and GPG_KEY_ID."""
         result = self.run_build(
             REPO_OWNER="",
             ORIGIN="Origin owner",
@@ -222,6 +230,7 @@ class BuildRepoTests(unittest.TestCase):
         )
 
     def test_default_signing_key_and_optional_sources(self):
+        """Signs with the default key and emits an empty Sources index."""
         for name in self.artifacts:
             if not name.endswith(".deb"):
                 (self.inputs / name).unlink()
@@ -235,6 +244,7 @@ class BuildRepoTests(unittest.TestCase):
         )
 
     def test_scanning_failures_are_fatal_and_not_signed(self):
+        """Scanner failures abort without signing or moving artifacts."""
         for scanner in ("dpkg-scanpackages", "dpkg-scansources"):
             with self.subTest(scanner=scanner):
                 # Each scanner needs fresh inputs because assembly consumes them.
@@ -253,6 +263,7 @@ class BuildRepoTests(unittest.TestCase):
                 self.assertFalse((self.site / "deb/.artifacts").exists())
 
     def test_signing_failures_are_fatal(self):
+        """Failed Release signatures abort assembly without artifacts."""
         for operation in ("--detach-sign", "--clearsign"):
             with self.subTest(operation=operation):
                 for name in self.artifacts:
@@ -262,6 +273,7 @@ class BuildRepoTests(unittest.TestCase):
                 self.assertFalse((self.site / "deb/.artifacts").exists())
 
     def test_other_command_failures_stop_assembly(self):
+        """Any helper tool failure stops assembly before signing."""
         for tool in ("find", "mv", "gzip", "release-find", "sha256sum"):
             with self.subTest(tool=tool):
                 for name in self.artifacts:
@@ -277,25 +289,30 @@ class BuildRepoTests(unittest.TestCase):
                 )
 
     def test_missing_owner_fails_before_moving(self):
+        """Missing owner configuration fails while inputs stay in place."""
         self.assert_failed(self.run_build(REPO_OWNER=""), "Set REPO_OWNER or ORIGIN")
         self.assertTrue((self.inputs / self.artifacts[0]).exists())
 
     def test_missing_site_fails_before_moving(self):
+        """A missing Jekyll output fails while inputs stay in place."""
         shutil.rmtree(self.site)
         self.assert_failed(self.run_build(), "Missing Jekyll output")
         self.assertTrue((self.inputs / self.artifacts[0]).exists())
 
     def test_missing_input_directory(self):
+        """A missing package input directory aborts assembly."""
         shutil.rmtree(self.root / "packages")
         self.assert_failed(self.run_build(), "Missing package input")
 
     def test_no_binary_packages_fails_before_moving_sources(self):
+        """No .deb packages fails assembly and source inputs remain."""
         for path in self.inputs.glob("*.deb"):
             path.unlink()
         self.assert_failed(self.run_build(), "No .deb packages found")
         self.assertTrue((self.inputs / "example_1.dsc").exists())
 
     def test_missing_secret_key_fails_before_moving(self):
+        """No GPG secret key fails assembly while inputs stay in place."""
         self.assert_failed(
             self.run_build(NO_KEYS="1"), "No GPG secret signing key found"
         )
