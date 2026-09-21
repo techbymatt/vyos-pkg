@@ -39,8 +39,8 @@ def scan_packages(
     packages: list[Path],
     report: Path,
     *,
-    total_timeout: float = 1800,
-    package_timeout: float = 300,
+    total_timeout: float = 600,
+    package_timeout: float = 120,
     kill_grace: float = 5,
     command: tuple[str, ...] = (
         "lintian",
