@@ -7,6 +7,11 @@ on:
         description: JSON array of expected producer architectures.
         required: true
         type: string
+      expected-artifacts:
+        description: JSON array of expected deb-<source>-<arch> producer directories; empty disables the completeness check.
+        required: false
+        type: string
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -15,7 +20,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout verification tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,19 +35,22 @@ jobs:
       - name: Validate package integrity
         env:
           EXPECTED_ARCHES: ${{ inputs.architectures }}
+          EXPECTED_ARTIFACTS: ${{ inputs.expected-artifacts }}
         run: |
-          python3 scripts/validate_packages.py --artifacts packages --expected-arches "$EXPECTED_ARCHES"
+          arguments=()
+          if [[ -n "$EXPECTED_ARTIFACTS" ]]; then
+            arguments+=(--expected-artifacts "$EXPECTED_ARTIFACTS")
+          fi
+          python3 scripts/validate_packages.py --artifacts packages --expected-arches "$EXPECTED_ARCHES" "${arguments[@]}"
       - name: Install Lintian
-        continue-on-error: true
         timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get --no-install-recommends --yes install lintian
       - name: Report Lintian advisories
-        continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: |
-          python3 scripts/report_lintian.py --artifacts packages --report lintian-report.txt
+          python3 scripts/report_lintian.py --artifacts packages --report lintian-report.txt --total-timeout 1140
       - name: Upload Lintian report
         if: ${{ always() && hashFiles('lintian-report.txt') != '' }}
         continue-on-error: true

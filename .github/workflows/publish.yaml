@@ -10,6 +10,7 @@ jobs:
     defaults:
       run:
         shell: bash
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' }}
     name: Cache check
     outputs:
       changed: ${{ steps.plan.outputs.changed }}
@@ -18,6 +19,7 @@ jobs:
       build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
       build-matrix: ${{ steps.plan.outputs.build-matrix }}
       restore-matrix: ${{ steps.plan.outputs.restore-matrix }}
+      verify-plan: ${{ steps.plan.outputs.verify-plan }}
     permissions:
       actions: read
       pages: read
@@ -52,6 +54,7 @@ jobs:
           repository: techbymatt/tbm-vyos-patch
           submodules: recursive
           token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
       - id: plan
         name: Plan builds from the cache state
         working-directory: patch
@@ -77,7 +80,7 @@ jobs:
           if-no-files-found: error
     timeout-minutes: 30
   build:
-    if: ${{ fromJSON(needs.cache-check.outputs.build-matrix).include[0] != null }}
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.build-matrix || '{"include":[]}').include[0] != null }}
     needs: [cache-check]
     permissions:
       contents: read
@@ -89,9 +92,11 @@ jobs:
       build-ref: ${{ needs.cache-check.outputs.patch-commit }}
       cache: true
       max-parallel: 4
-    secrets: inherit
+    secrets:
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
   build-extra:
-    if: ${{ fromJSON(needs.cache-check.outputs.build-extra-matrix).include[0] != null }}
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.build-extra-matrix || '{"include":[]}').include[0] != null }}
     needs: [cache-check]
     permissions:
       contents: read
@@ -103,7 +108,7 @@ jobs:
       build-ref: rolling
       cache: true
   restore-cached:
-    if: ${{ fromJSON(needs.cache-check.outputs.restore-matrix).include[0] != null }}
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.restore-matrix || '{"include":[]}').include[0] != null }}
     name: Restore (cache hit)
     needs:
       - cache-check
@@ -160,7 +165,7 @@ jobs:
       matrix: ${{ fromJSON(needs.cache-check.outputs.restore-matrix) }}
     timeout-minutes: 40
   verify:
-    if: ${{ !cancelled() && needs.cache-check.outputs.changed == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && needs.cache-check.outputs.changed == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build.result == 'success' || needs.build-extra.result == 'success' || needs.restore-cached.result == 'success') }}
     needs:
       - cache-check
       - build
@@ -169,8 +174,9 @@ jobs:
     uses: ./.github/workflows/verify-packages.yaml
     with:
       architectures: '["amd64","arm64"]'
+      expected-artifacts: ${{ needs.cache-check.outputs.verify-plan }}
   publish:
-    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && needs.verify.result == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

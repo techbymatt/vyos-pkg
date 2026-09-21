@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote
 
@@ -79,6 +80,11 @@ def plan_test(
                 arches.add(arch)
         result[group + "-matrix"] = {"include": entries}
     result["verify-arches"] = sorted(arches)
+    result["verify-plan"] = sorted(
+        f"deb-{entry['package']}-{entry['arch']}"
+        for group in ("build", "build-extra")
+        for entry in result[group + "-matrix"]["include"]
+    )
     return result
 
 
@@ -127,6 +133,7 @@ def plan_publish(
         for name in ("build-matrix", "build-extra-matrix", "restore-matrix")
     }
     if not changed and not force_rebuild:
+        result["verify-plan"] = []
         return result
     hits: dict[str, list[dict]] = {}
     for record in records:
@@ -158,6 +165,18 @@ def plan_publish(
                     "entries": entries[start : start + RESTORE_BATCH_SIZE],
                 }
             )
+    result["verify-plan"] = sorted(
+        [
+            f"deb-{entry['package']}-{entry['arch']}"
+            for matrix in ("build-matrix", "build-extra-matrix")
+            for entry in result[matrix]["include"]
+        ]
+        + [
+            f"deb-{entry['package']}-{entry['arch']}"
+            for batch in result["restore-matrix"]["include"]
+            for entry in batch["entries"]
+        ]
+    )
     return result
 
 
@@ -339,6 +358,19 @@ def run_publish(args: argparse.Namespace) -> dict:
     return result
 
 
+def output_lines(result: dict) -> Iterator[str]:
+    """Encode results as GITHUB_OUTPUT lines, rejecting embedded line breaks."""
+    for name, value in result.items():
+        encoded = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, separators=(",", ":"))
+        )
+        if "\n" in encoded or "\r" in encoded:
+            raise ValueError(f"output {name!r} would span multiple lines")
+        yield f"{name}={encoded}"
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI status: 0 success, 1 failure; stdout holds only GITHUB_OUTPUT lines."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -359,13 +391,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "test"
             else run_publish(args)
         )
-        for name, value in result.items():
-            encoded = (
-                value
-                if isinstance(value, str)
-                else json.dumps(value, separators=(",", ":"))
-            )
-            print(f"{name}={encoded}")
+        for line in output_lines(result):
+            print(line)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"plan_builds: {error}", file=sys.stderr)
         return 1

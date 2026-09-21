@@ -60,6 +60,19 @@ class TestPlannerTests(unittest.TestCase):
         self.assertEqual([e["deps"] for e in extra], ["bison flex"] * 3)
         self.assertEqual(result["verify-arches"], ["amd64", "arm64"])
         self.assertEqual(
+            result["verify-plan"],
+            [
+                "deb-frr-amd64",
+                "deb-frr-arm64",
+                "deb-hvinfo-amd64",
+                "deb-hvinfo-arm64",
+                "deb-live-boot-amd64",
+                "deb-new-source-amd64",
+                "deb-new-source-arm64",
+                "deb-pyhumps-amd64",
+            ],
+        )
+        self.assertEqual(
             planner.plan_test("", "hvinfo", "")["build-extra-matrix"]["include"][0][
                 "deps"
             ],
@@ -71,6 +84,7 @@ class TestPlannerTests(unittest.TestCase):
         result = planner.plan_test(" ,\t", "", "")
         self.assertEqual(result["verify-arches"], [])
         self.assertEqual(result["build-matrix"], {"include": []})
+        self.assertEqual(result["verify-plan"], [])
         self.assertEqual(
             planner.plan_test("shim-signed", "vyos-live-build", "")["verify-arches"],
             ["amd64"],
@@ -113,9 +127,32 @@ class TestPlannerTests(unittest.TestCase):
             )
         }
         self.assertEqual(
-            set(outputs), {"build-matrix", "build-extra-matrix", "verify-arches"}
+            set(outputs),
+            {"build-matrix", "build-extra-matrix", "verify-arches", "verify-plan"},
         )
         self.assertEqual(outputs["verify-arches"], ["amd64", "arm64"])
+        self.assertEqual(
+            outputs["verify-plan"],
+            [
+                "deb-frr-amd64",
+                "deb-frr-arm64",
+                "deb-hvinfo-amd64",
+                "deb-hvinfo-arm64",
+                "deb-pyhumps-amd64",
+            ],
+        )
+
+    def test_output_lines_reject_line_breaks(self) -> None:
+        """GITHUB_OUTPUT emission rejects values spanning multiple lines."""
+        self.assertEqual(
+            list(planner.output_lines({"changed": True})), ["changed=true"]
+        )
+        for value in ("a\nb", "a\rb"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "would span multiple lines"),
+            ):
+                list(planner.output_lines({"value": value}))
 
 
 class PublishPlannerTests(unittest.TestCase):
@@ -194,8 +231,12 @@ class PublishPlannerTests(unittest.TestCase):
                 [row], keys, NAMESPACE, "123-1", changed=False
             )
             self.assertTrue(
-                all(matrix == {"include": []} for matrix in result.values())
+                all(
+                    result[name] == {"include": []}
+                    for name in ("build-matrix", "build-extra-matrix", "restore-matrix")
+                )
             )
+            self.assertEqual(result["verify-plan"], [])
             result = planner.plan_publish(
                 [row], keys, NAMESPACE, "123-1", changed=False, force_rebuild=True
             )
@@ -204,6 +245,7 @@ class PublishPlannerTests(unittest.TestCase):
                 cache_key(row, "123-1"),
             )
             self.assertEqual(result["restore-matrix"], {"include": []})
+            self.assertEqual(result["verify-plan"], ["deb-frr-amd64"])
 
     def test_restore_batches_eight_without_mixing_runners(self) -> None:
         """Restore entries batch to eight per job without mixing runners."""
@@ -231,6 +273,12 @@ class PublishPlannerTests(unittest.TestCase):
             ),
             18,
         )
+
+    def test_verify_plan_covers_build_and_restored_records(self) -> None:
+        """Every planned producer contributes exactly one expected directory."""
+        rows = [record(), record("hvinfo", "arm64", "build-extra", "gnat gprbuild")]
+        result = planner.plan_publish(rows, [cache_key(rows[0])], NAMESPACE, "123-1")
+        self.assertEqual(result["verify-plan"], ["deb-frr-amd64", "deb-hvinfo-arm64"])
 
     def test_source_records_cover_catalog_policy(self) -> None:
         """Every catalog source yields a record; missing revisions are rejected."""
@@ -385,6 +433,16 @@ class PublishBoundaryTests(unittest.TestCase):
         saved = planner.manifest.load_manifest(self.root / "input-manifest.json")
         self.assertEqual(len(saved["packages"]), 5)
         self.assertTrue(all("cache_key" not in row for row in saved["packages"]))
+        self.assertEqual(
+            result["verify-plan"],
+            [
+                "deb-hvinfo-amd64",
+                "deb-hvinfo-arm64",
+                "deb-linux-kernel-amd64",
+                "deb-linux-kernel-arm64",
+                "deb-pyhumps-amd64",
+            ],
+        )
 
     def test_only_deployed_manifest_suppresses_publication(self) -> None:
         """A deployed matching manifest suppresses publication until force_rebuild."""
@@ -399,6 +457,7 @@ class PublishBoundaryTests(unittest.TestCase):
                 for name in ("build-matrix", "build-extra-matrix", "restore-matrix")
             )
         )
+        self.assertEqual(result["verify-plan"], [])
         self.args.force_rebuild = True
         self.calls.clear()
         self.assertTrue(self.run_publish()[0]["changed"])
@@ -504,11 +563,13 @@ class PublishBoundaryTests(unittest.TestCase):
                 "build-matrix",
                 "build-extra-matrix",
                 "restore-matrix",
+                "verify-plan",
             },
         )
         self.assertEqual(outputs["changed"], "true")
         self.assertEqual(outputs["patch-commit"], REVISION)
         self.assertEqual(len(json.loads(outputs["build-matrix"])["include"]), 3)
+        self.assertEqual(len(json.loads(outputs["verify-plan"])), 5)
         self.assertIn("Publication inputs changed", stderr.getvalue())
 
 

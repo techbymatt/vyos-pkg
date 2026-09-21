@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -27,6 +28,16 @@ def stop_process_group(process: subprocess.Popen, grace: float) -> None:
 def report_lintian(
     packages: list[Path],
     report: Path,
+    **kwargs: object,
+) -> str:
+    """Scan packages and return only the summary; see scan_packages."""
+    summary, _ = scan_packages(packages, report, **kwargs)
+    return summary
+
+
+def scan_packages(
+    packages: list[Path],
+    report: Path,
     *,
     total_timeout: float = 1800,
     package_timeout: float = 300,
@@ -38,7 +49,7 @@ def report_lintian(
         "--fail-on",
         "error,warning",
     ),
-) -> str:
+) -> tuple[str, bool]:
     """Scan each package under per-package and overall budgets, writing the report."""
     counts = {
         "completed": 0,
@@ -104,7 +115,7 @@ def report_lintian(
         log(summary)
         if incomplete or counts["findings"]:
             print("::warning::" + summary, flush=True)
-    return summary
+    return summary, incomplete
 
 
 def positive_seconds(value: str) -> float:
@@ -115,16 +126,20 @@ def positive_seconds(value: str) -> float:
     return seconds
 
 
-def main() -> None:
-    """Scan --artifacts and append the summary to GITHUB_STEP_SUMMARY when set."""
+def main(argv: list[str] | None = None) -> int:
+    """Scan --artifacts, append the summary to GITHUB_STEP_SUMMARY when set.
+
+    Status: 0 complete scan, 1 incomplete (the scan must not silently degrade to
+    zero coverage); lintian findings remain advisory and never fail the run.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--report", type=Path, default=Path("lintian-report.txt"))
     parser.add_argument("--total-timeout", type=positive_seconds, default=600)
     parser.add_argument("--package-timeout", type=positive_seconds, default=120)
     parser.add_argument("--kill-grace", type=positive_seconds, default=5)
-    args = parser.parse_args()
-    summary = report_lintian(
+    args = parser.parse_args(argv)
+    summary, incomplete = scan_packages(
         sorted(args.artifacts.rglob("*.deb")),
         args.report,
         total_timeout=args.total_timeout,
@@ -134,7 +149,8 @@ def main() -> None:
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as output:
             output.write(summary + "\n")
+    return 1 if incomplete else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

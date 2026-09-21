@@ -7,6 +7,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from . import report_lintian as rl
@@ -110,6 +111,21 @@ class ReportTests(unittest.TestCase):
         self.packages = []
         summary, _, _ = self.scan("raise SystemExit(0)")
         self.assertIn("INCOMPLETE", summary)
+
+    def test_main_exit_code_reflects_scan_completeness(self):
+        """main returns 1 for incomplete scans and 0 for complete ones."""
+        arguments = [
+            "--artifacts",
+            str(self.root),
+            "--report",
+            str(self.report),
+        ]
+        for incomplete, expected in ((True, 1), (False, 0)):
+            with (
+                self.subTest(incomplete=incomplete),
+                patch.object(rl, "scan_packages", return_value=("summary", incomplete)),
+            ):
+                self.assertEqual(rl.main(arguments), expected)
 
 
 if __name__ == "__main__":
