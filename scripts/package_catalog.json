@@ -78,10 +78,10 @@
       "name": "openssl"
     },
     {
-      "name": "openvpn"
+      "name": "openvpn-otp"
     },
     {
-      "name": "openvpn-otp"
+      "name": "openvpn"
     },
     {
       "name": "owamp"
@@ -114,6 +114,9 @@
     },
     {
       "name": "udp-broadcast-relay"
+    },
+    {
+      "name": "vyatta-bash"
     },
     {
       "name": "vyos-1x"
@@ -176,13 +179,6 @@
     {
       "name": "live-boot",
       "architecture": "independent_only"
-    },
-    {
-      "name": "vyatta-bash",
-      "deps": [
-        "bison",
-        "libncurses5-dev"
-      ]
     },
     {
       "name": "vyatta-biosdevname",
