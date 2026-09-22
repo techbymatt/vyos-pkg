@@ -6,6 +6,8 @@ Archives are spooled to temporary files and regular members are streamed, not
 extracted: absolute symlinks are inert data, never host filesystem references.
 This is not a dependency, signature, installability or runtime check. Inputs must
 remain unchanged during validation; temporary disk use scales with archive size.
+Artifact mode can additionally require every planned producer directory to be
+present (--expected-artifacts), closing the silent-missing-producer gap.
 """
 
 from __future__ import annotations
@@ -167,6 +169,31 @@ def validate_artifacts(
     )
 
 
+def validate_expected_artifacts(directory: Path, expected: list[str]) -> None:
+    """Require every planned producer directory to exist with content."""
+    if (
+        not isinstance(expected, list)
+        or not expected
+        or any(not isinstance(name, str) for name in expected)
+    ):
+        raise ValueError("expected artifacts must be a nonempty list of names")
+    seen = set()
+    for name in expected:
+        if name in seen:
+            raise ValueError(f"duplicate expected artifact: {name}")
+        seen.add(name)
+        if re.fullmatch(r"deb-.*-(amd64|arm64)", name) is None:
+            raise ValueError(f"invalid expected artifact name: {name}")
+        path = directory / name
+        try:
+            if not path.is_dir() or not any(path.iterdir()):
+                raise ValueError(
+                    f"missing or empty expected artifact directory: {name}"
+                )
+        except OSError as error:
+            raise ValueError(f"{path}: {error}") from error
+
+
 def _validate_packages(packages: list[tuple[Path, str]]) -> None:
     """Validate each package, rejecting identical identities with differing bytes."""
     seen: dict[tuple[str, str, str], str] = {}
@@ -216,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--arch", choices=("amd64", "arm64"))
     mode.add_argument("--artifacts", type=Path, metavar="DIRECTORY")
     parser.add_argument("--expected-arches", type=json.loads, metavar="JSON")
+    parser.add_argument("--expected-artifacts", type=json.loads, metavar="JSON")
     parser.add_argument("packages", type=Path, nargs="*")
     args = parser.parse_args(argv)
     if args.artifacts is not None and args.packages:
@@ -224,10 +252,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--arch requires at least one package path")
     if args.expected_arches is not None and args.artifacts is None:
         parser.error("--expected-arches requires --artifacts")
+    if args.expected_artifacts is not None and args.artifacts is None:
+        parser.error("--expected-artifacts requires --artifacts")
     if args.artifacts is not None and args.expected_arches is None:
         parser.error("--artifacts requires --expected-arches")
     try:
         if args.artifacts is not None:
+            if args.expected_artifacts is not None:
+                validate_expected_artifacts(args.artifacts, args.expected_artifacts)
             validate_artifacts(args.artifacts, args.expected_arches)
         else:
             validate_packages(args.packages, args.arch)

@@ -25,6 +25,7 @@ jobs:
       build-matrix: ${{ steps.plan.outputs.build-matrix }}
       build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
       verify-arches: ${{ steps.plan.outputs.verify-arches }}
+      verify-plan: ${{ steps.plan.outputs.verify-plan }}
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout build tools
@@ -41,7 +42,7 @@ jobs:
           python3 scripts/plan_builds.py test --packages "$PACKAGES" --extra-packages "$EXTRA_PACKAGES" --deps "$DEPS" >> "$GITHUB_OUTPUT"
     timeout-minutes: 5
   build:
-    if: ${{ fromJSON(needs.setup-matrix.outputs.build-matrix).include[0] != null }}
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-matrix || '{"include":[]}').include[0] != null }}
     needs: [setup-matrix]
     permissions:
       contents: read
@@ -53,9 +54,11 @@ jobs:
       build-ref: ""
       cache: false
       max-parallel: 8
-    secrets: inherit
+    secrets:
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
   build-extra:
-    if: ${{ fromJSON(needs.setup-matrix.outputs.build-extra-matrix).include[0] != null }}
+    if: ${{ fromJSON(needs.setup-matrix.outputs.build-extra-matrix || '{"include":[]}').include[0] != null }}
     needs: [setup-matrix]
     permissions:
       contents: read
@@ -75,3 +78,4 @@ jobs:
     uses: ./.github/workflows/verify-packages.yaml
     with:
       architectures: ${{ needs.setup-matrix.outputs.verify-arches }}
+      expected-artifacts: ${{ needs.setup-matrix.outputs.verify-plan }}

@@ -1,6 +1,7 @@
 """Contracts shared by the manual and publication workflows (stdlib only)."""
 
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -34,6 +35,17 @@ class TestWorkflowTests(unittest.TestCase):
                     self.assertIn("image:", text)
                     self.assertIn("build-ref:", text)
                     self.assertNotIn("steps:", text)
+
+    def test_reusable_build_calls_map_only_app_secrets(self):
+        """Recipe builds receive App credentials explicitly; standalone none."""
+        for caller in ("test", "publish"):
+            workflow = (WORKFLOWS / f"{caller}.yaml").read_text()
+            with self.subTest(caller=caller):
+                build = job_text(workflow, "build")
+                self.assertIn("APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}", build)
+                self.assertIn("APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}", build)
+                self.assertNotIn("secrets: inherit", build)
+                self.assertNotIn("secrets:", job_text(workflow, "build-extra"))
 
     def test_planners_receive_raw_inputs_and_publication_context(self):
         """Planners receive raw inputs plus publication context."""
@@ -95,6 +107,17 @@ class TestWorkflowTests(unittest.TestCase):
                 self.assertIn("--group build-extra --root packages", text)
                 self.assertIn("matrix.commit || inputs.build-ref", text)
 
+    def test_untrusted_checkouts_do_not_persist_credentials(self):
+        """Untrusted-source checkouts stop persisting git credentials."""
+        recipe = (WORKFLOWS / "build-recipe.yaml").read_text()
+        self.assertIn("repository: techbymatt/tbm-vyos-patch", recipe)
+        self.assertIn("persist-credentials: false", recipe)
+        standalone = (WORKFLOWS / "build-standalone.yaml").read_text()
+        self.assertIn("repository: vyos/${{ matrix.package }}", standalone)
+        self.assertIn("persist-credentials: false", standalone)
+        publish = job_text((WORKFLOWS / "publish.yaml").read_text(), "cache-check")
+        self.assertIn("persist-credentials: false", publish)
+
     def test_shared_output_policy_precedes_both_uploads(self):
         """Artifact uploads run after the output policy check."""
         text = (ACTIONS / "package-artifacts/action.yaml").read_text()
@@ -109,7 +132,9 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn("path: ${{ steps.paths.outputs.cache }}", restore)
         self.assertIn("CACHE_PATHS: ${{ steps.paths.outputs.cache }}", restore)
         self.assertIn('>"$shim/zstd"', restore)
-        self.assertIn("fail-on-cache-miss: true", restore)
+        self.assertNotIn("fail-on-cache-miss", restore)
+        self.assertIn("id: restore\n", restore)
+        self.assertIn("steps.restore.outputs.cache-hit == 'true'", restore)
 
     def test_path_contract_matches_legacy_cache_order(self):
         """package-paths emits the legacy cache order for each group."""
@@ -163,6 +188,23 @@ class TestWorkflowTests(unittest.TestCase):
             text.count("uses: ./workflow/.github/actions/restore-package"), 8
         )
 
+    def test_restore_slots_match_planner_batch_size(self):
+        """Publish restore slots stay in sync with the planner batch size."""
+        try:
+            from .plan_builds import RESTORE_BATCH_SIZE
+        except ImportError:
+            from plan_builds import RESTORE_BATCH_SIZE
+        slots = sorted(
+            {
+                int(match)
+                for match in re.findall(
+                    r"toJSON\(matrix\.entries\[(\d+)\]\)",
+                    (WORKFLOWS / "publish.yaml").read_text(),
+                )
+            }
+        )
+        self.assertEqual(slots, list(range(RESTORE_BATCH_SIZE)))
+
     def test_combined_verification_preserves_producer_directories(self):
         """Verification downloads keep producer directories intact."""
         for name in ("test", "publish"):
@@ -174,23 +216,58 @@ class TestWorkflowTests(unittest.TestCase):
                     "architectures: ${{ needs.setup-matrix.outputs.verify-arches }}",
                     text,
                 )
+                self.assertIn(
+                    "expected-artifacts: ${{ needs.setup-matrix.outputs.verify-plan }}",
+                    text,
+                )
             else:
                 self.assertIn('architectures: \'["amd64","arm64"]\'', text)
+                self.assertIn(
+                    "expected-artifacts: ${{ needs.cache-check.outputs.verify-plan }}",
+                    text,
+                )
                 self.assertIn("needs.cache-check.outputs.changed == 'true'", text)
+                self.assertIn(
+                    "(needs.build.result == 'success'"
+                    " || needs.build-extra.result == 'success'"
+                    " || needs.restore-cached.result == 'success')",
+                    text,
+                )
         verify = (WORKFLOWS / "verify-packages.yaml").read_text()
         self.assertIn("runs-on: ubuntu-26.04", verify)
         self.assertNotIn("container:", verify)
         self.assertNotIn("matrix:", verify)
         self.assertIn("pattern: deb-*\n", verify)
         self.assertIn("merge-multiple: false", verify)
+        self.assertIn("EXPECTED_ARTIFACTS: ${{ inputs.expected-artifacts }}", verify)
         self.assertIn(
             '--artifacts packages --expected-arches "$EXPECTED_ARCHES"', verify
         )
+        self.assertIn('"${arguments[@]}"', verify)
         self.assertIn("python3 scripts/report_lintian.py --artifacts packages", verify)
+        self.assertIn("--total-timeout 1140", verify)
         self.assertIn("timeout-minutes: 5", verify)
-        self.assertIn("timeout-minutes: 12", verify)
+        self.assertIn("timeout-minutes: 20", verify)
+        self.assertIn("timeout-minutes: 45", verify)
         self.assertIn("always() && hashFiles('lintian-report.txt') != ''", verify)
-        self.assertIn("continue-on-error: true", verify)
+        self.assertEqual(verify.count("continue-on-error: true"), 1)
+
+    def test_publish_jobs_are_repository_gated(self):
+        """Every publish job refuses to run outside the canonical repository."""
+        workflow = (WORKFLOWS / "publish.yaml").read_text()
+        for job in (
+            "cache-check",
+            "build",
+            "build-extra",
+            "restore-cached",
+            "verify",
+            "publish",
+        ):
+            with self.subTest(job=job):
+                self.assertIn(
+                    "github.repository == 'techbymatt/vyos-pkg'",
+                    job_text(workflow, job),
+                )
 
     def test_publication_requires_successful_verification(self):
         """Publish gates on a successful verify job."""

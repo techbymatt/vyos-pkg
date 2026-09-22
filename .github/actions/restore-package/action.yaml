@@ -22,12 +22,13 @@ runs:
         group: ${{ fromJSON(inputs.entry).group }}
         package: ${{ fromJSON(inputs.entry).package }}
     - name: Restore the cached build
+      id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        fail-on-cache-miss: true
         key: ${{ fromJSON(inputs.entry).cache_key }}
         path: ${{ steps.paths.outputs.cache }}
     - name: Check and upload package artifacts
+      if: ${{ steps.restore.outputs.cache-hit == 'true' }}
       uses: ./workflow/.github/actions/package-artifacts
       with:
         group: ${{ fromJSON(inputs.entry).group }}

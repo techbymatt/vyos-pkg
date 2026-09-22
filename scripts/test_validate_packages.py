@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -34,6 +35,7 @@ def tar_bytes(*entries: tuple[str, bytes | tuple[bytes, str]]) -> bytes:
 
 class ValidatePackagesTests(unittest.TestCase):
     """Covers package validation, archive safety, checksums, and artifact grouping."""
+
     def setUp(self) -> None:
         """Create a sample package and mock the external dpkg tools."""
         temporary = tempfile.TemporaryDirectory()
@@ -422,6 +424,82 @@ class ValidatePackagesTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "expected architectures"),
             ):
                 vp.validate_artifacts(self.root, arches)
+
+    def test_expected_artifacts_completeness(self) -> None:
+        """Every planned producer directory must exist with content."""
+        self.artifact_package("deb-sample-amd64")
+        self.artifact_package("deb-sample-arm64")
+        expected = ["deb-sample-amd64", "deb-sample-arm64"]
+        vp.validate_expected_artifacts(self.root, expected)
+        (self.root / "deb-sample-arm64").rename(self.root / "moved-away")
+        with self.assertRaisesRegex(
+            ValueError, "missing or empty expected artifact directory: deb-sample-arm64"
+        ):
+            vp.validate_expected_artifacts(self.root, expected)
+        shutil.rmtree(self.root / "deb-sample-amd64")
+        (self.root / "deb-sample-amd64").mkdir()
+        with self.assertRaisesRegex(
+            ValueError, "missing or empty expected artifact directory: deb-sample-amd64"
+        ):
+            vp.validate_expected_artifacts(self.root, expected)
+
+    def test_expected_artifacts_rejects_bad_inputs(self) -> None:
+        """Malformed lists, duplicates, and invalid names raise ValueError."""
+        for expected in ([], "deb-sample-amd64", {}, [None], [1]):
+            with (
+                self.subTest(expected=expected),
+                self.assertRaisesRegex(ValueError, "expected artifacts must be"),
+            ):
+                vp.validate_expected_artifacts(self.root, expected)
+        for expected in (
+            ["deb-sample-amd64", "deb-sample-amd64"],
+            ["linux-amd64"],
+            ["deb-linux-riscv64"],
+        ):
+            with (
+                self.subTest(expected=expected),
+                self.assertRaisesRegex(ValueError, "expected artifact"),
+            ):
+                vp.validate_expected_artifacts(self.root, expected)
+
+    def test_cli_expected_artifacts(self) -> None:
+        """CLI enforces producer completeness before package validation."""
+        self.artifact_package("deb-sample-amd64")
+        arguments = ["--artifacts", str(self.root), "--expected-arches", '["amd64"]']
+        self.assertEqual(
+            vp.main([*arguments, "--expected-artifacts", '["deb-sample-amd64"]']), 0
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(
+                vp.main([*arguments, "--expected-artifacts", '["deb-absent-amd64"]']),
+                1,
+            )
+        self.assertIn("deb-absent-amd64", stderr.getvalue())
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(vp.main([*arguments, "--expected-artifacts", "[]"]), 1)
+        self.assertIn("expected artifacts must be", stderr.getvalue())
+        with (
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            vp.main([*arguments, "--expected-artifacts", "{bad"])
+        self.assertEqual(error.exception.code, 2)
+        with (
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            vp.main(
+                [
+                    "--arch",
+                    "amd64",
+                    str(self.package),
+                    "--expected-artifacts",
+                    "[]",
+                ]
+            )
+        self.assertEqual(error.exception.code, 2)
 
     def test_artifact_duplicates_checked_across_sources(self) -> None:
         """Identical duplicates across artifact sources pass; differing ones fail."""
