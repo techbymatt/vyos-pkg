@@ -247,7 +247,7 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn(
             "python3 scripts/report_lintian.py --artifacts packages"
             " --report lintian-report.txt --total-timeout 3600"
-            " --package-timeout 300 --jobs 4",
+            " --package-timeout 600 --jobs 4",
             verify,
         )
         self.assertIn("timeout-minutes: 5", verify)
