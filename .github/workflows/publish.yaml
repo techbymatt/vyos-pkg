@@ -81,6 +81,7 @@ jobs:
     timeout-minutes: 30
   build:
     if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.build-matrix || '{"include":[]}').include[0] != null }}
+    name: Build
     needs: [cache-check]
     permissions:
       contents: read
@@ -97,6 +98,7 @@ jobs:
       APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
   build-extra:
     if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.build-extra-matrix || '{"include":[]}').include[0] != null }}
+    name: Build (extra)
     needs: [cache-check]
     permissions:
       contents: read
@@ -166,6 +168,7 @@ jobs:
     timeout-minutes: 40
   verify:
     if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && needs.cache-check.outputs.changed == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build.result == 'success' || needs.build-extra.result == 'success' || needs.restore-cached.result == 'success') }}
+    name: Verify
     needs:
       - cache-check
       - build

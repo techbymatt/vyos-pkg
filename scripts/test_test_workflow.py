@@ -244,9 +244,12 @@ class TestWorkflowTests(unittest.TestCase):
             '--artifacts packages --expected-arches "$EXPECTED_ARCHES"', verify
         )
         self.assertIn('"${arguments[@]}"', verify)
-        self.assertIn("python3 scripts/report_lintian.py --artifacts packages", verify)
-        self.assertIn("--total-timeout 3600", verify)
-        self.assertIn("--package-timeout 300", verify)
+        self.assertIn(
+            "python3 scripts/report_lintian.py --artifacts packages"
+            " --report lintian-report.txt --total-timeout 3600"
+            " --package-timeout 600 --jobs 4",
+            verify,
+        )
         self.assertIn("timeout-minutes: 5", verify)
         self.assertIn("timeout-minutes: 60", verify)
         self.assertIn("timeout-minutes: 75", verify)
