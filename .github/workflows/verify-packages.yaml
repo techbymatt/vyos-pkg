@@ -20,7 +20,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Checkout verification tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
