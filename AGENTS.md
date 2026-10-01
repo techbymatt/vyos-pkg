@@ -1,34 +1,40 @@
 # Repository guidance
 
+`CLAUDE.md` symlinks to this file; keep one instruction source.
+
 ## Build boundaries
 
-- This repository orchestrates external package builds; the VyOS recipes are in the `vyos-build` submodule of `techbymatt/tbm-vyos-patch`, not this checkout. Apply downstream patches before `scripts/prepare_package_build.py` adaptations.
-- For package additions, follow [README.md: Adding packages](README.md#adding-packages). `scripts/package_catalog.json` contains source names, not necessarily binary package names, grouped under `build` and `build-extra`.
-- The manual **Test** workflow accepts source names directly. For standalone packages, its `deps` input must be supplied separately; it does not read the catalog's Publish dependencies.
+- Recipes live in the `vyos-build` submodule of `techbymatt/tbm-vyos-patch`, not this checkout. Execution order: downstream patches → `scripts/prepare_package_build.py` → `scripts/package_sources.py pin` (Publish) → build.
+- For additions, follow [README.md: Adding packages](README.md#adding-packages). `scripts/package_catalog.json` lists **source** names: `build` for recipes, `build-extra` for standalone `vyos/<name>` repositories on `rolling`, not necessarily binary package names. Membership/dependencies are also pinned in `scripts/test_package_catalog.py`.
+- Manual **Test** uses `package` for recipes and `package-extra` for standalone sources; uncatalogued names default to both architectures. Supply standalone dependencies through comma-separated `deps`; catalog dependencies are ignored. Test disables caching.
 
-## Architecture and verification
+## Package and CI contracts
 
-- amd64 owns every `Architecture: all` output. Independent-only sources use `architecture: independent_only` in `scripts/package_catalog.json`; mixed sources still need both native builds. Skip independent sub-builds on arm64 before execution, rather than filtering their artifacts afterward.
-- Custom recipe commands can bypass the shared builder. Audit nested scripts and packaging tools when changing `scripts/prepare_package_build.py`; its exact replacements intentionally fail on upstream command drift.
-- Keep Verify downloads in separate `deb-<source>-<arch>` directories. `validate_packages.py --artifacts` derives producer architecture from those names and checks identities across both groups before Publish merges files.
-- Completeness is enforced end to end: `plan_builds.py` emits a `verify-plan` list that both callers pass to Verify as `expected-artifacts`, so a producer that contributes no artifact directory fails verification. Restore jobs tolerate cache misses and rely on that check to catch evictions.
-- Verification reads package archives without installing packages or executing maintainer scripts. Lintian findings are advisory and never fail a run, but an incomplete scan does: `report_lintian.py` exits 1 when packages timed out, failed, or went unscanned (the verify step runs it with `--total-timeout 3600` inside a 60-minute step).
+- Catalog `architecture` defaults to `dual`; mixed sources need both native builds. Use `independent_only` for all-independent outputs and `amd64_only` for amd64-only sources; both schedule only amd64.
+- amd64 owns every `Architecture: all` output. Skip independent sub-builds on arm64 before execution, never by deleting duplicate artifacts afterward.
+- Audit custom builders, nested hooks, and packaging tools in `scripts/prepare_package_build.py` (build modes) and `scripts/package_sources.py` (discovery/pinning). Checked replacements must fail on upstream drift. Publish must pin every clone to its planned full commit; retain original ref labels for version metadata.
+- Use `.github/actions/package-paths` and `.github/actions/package-artifacts` for fresh and restored outputs. Preserve ordered cache paths and gzip compatibility for legacy archives.
+- Keep Verify downloads unmerged in `deb-<source>-<arch>` directories. `scripts/validate_packages.py --artifacts` infers architecture from these names and checks identities across all producers.
+- Both callers must pass `scripts/plan_builds.py`'s `verify-plan` to Verify as `expected-artifacts`: restore jobs tolerate cache misses, so this catches evictions/missing producers. It does not prove every expected binary was built.
+- Verification never installs packages or executes maintainer scripts. Lintian findings are advisory, but failed/timed-out/unscanned packages fail Verify; keep `--total-timeout 3600` within its 60-minute step.
+- Workflow/action YAML is tested as text in `scripts/test_test_workflow.py`: preserve cache policy, explicit App secrets only for recipe calls, `persist-credentials: false`, Publish repository guards, and Verify wiring. Keep eight restore slots synchronized with `RESTORE_BATCH_SIZE`.
+- Planner stdout is only `GITHUB_OUTPUT` assignments; diagnostics go to stderr. Declare new planner outputs in the producing job's `outputs:` block.
 
-## Cache and publication coupling
+## Cache and publication
 
-- `scripts/cache_namespace.py` hashes selected build inputs, not the whole repository. Add new build-affecting helpers/policy files to its input surface and tests; verification-only edits should not invalidate package caches. Editing anything in its `BUILD_INPUTS` tuple (both build workflows, all three composite actions, catalog json/py, `package_build_policy.py`, `prepare_package_build.py`, `plan_builds.py`) churns the namespace and forces a one-off full rebuild of every package on the next Publish run — batch such edits. `publish.yaml`, `test.yaml`, `verify-packages.yaml`, `validate_packages.py`, `report_lintian.py`, and `build_repo.sh` are cache-safe.
-- Shared build workflows and restore jobs use `.github/actions/package-paths` and `package-artifacts`. Preserve this common path contract and enforce the same output policy for fresh and restored builds.
-- `scripts/test_test_workflow.py` pins workflow and action YAML as text (cache policy, explicit App-secret mapping on build-recipe calls and no secrets on build-standalone, `persist-credentials: false`, repository guards, verify wiring, the eight restore slots vs `RESTORE_BATCH_SIZE`). Update it whenever editing workflows or actions. New planner outputs must also be declared in the producing job's `outputs:` block or actionlint reports `[expression]` errors.
-- `scripts/publish_manifest.py` controls publication skipping separately from package caching. The manifest advances only with the Pages deployment; live APT and moving recipe refs are not locked. `force_rebuild` refreshes those inputs and republishes.
-- `scripts/build_repo.sh` consumes/moves `packages/rolling` into `_site/deb` and signs the repository. In CI it runs after Jekyll; it is not a local test command.
+- `scripts/package_sources.py` fingerprints patched recipe folders, every Git repository actually built, and audited consumer-specific inputs; standalone sources use their `rolling` commit. Kernel defaults/certificates affect only the kernel.
+- Source caches exclude shared builders, build images, local workflows/helpers, unrelated recipes/patches/data, and catalog dependencies. Run **Repository** with `force_rebuild` to apply local build-policy/tooling changes or refresh unlocked APT/toolchains; ordinary republishing can reuse cached binaries. Also force publication after signing-credential rotation.
+- `scripts/legacy_package_cache.py` proves recipe caches from producer manifests, historical patched trees, and successful build-step checkout evidence; standalone caches use recorded repository commits. Missing/ambiguous evidence means rebuilding, never substituting today's refs or workflow submodule pins. Metadata-service outages fail planning. Save migrated source-key caches only after restore/output checks.
+- Publication tracking (`scripts/publish_manifest.py`) is separate from compilation. Only deployed Pages `input-manifest.json` advances the baseline, not local candidates. New manifests use schema v2; preserve v1 readability for legacy proofs.
+- Do not run `scripts/build_repo.sh` as a local test: it moves `packages/rolling` into `_site/deb` and signs the repository after Jekyll. Use `scripts.test_build_repo` fixtures instead.
 
 ## Focused checks
 
-- Use Python 3.11+; the Python helpers/tests use the standard library, with no Python package-manager bootstrap. Repository assembly fixtures also need Bash, GNU checksum tools, gzip, and bzip2.
-- One test module: `python3 -m unittest scripts.test_package_build_policy -v` (append `.ClassName.test_method` for one case).
-- All tool tests: `python3 -m unittest discover -s scripts -v`. The pre-commit hook runs this entire suite for changes under `scripts/`, workflows, or actions.
+- Python 3.11+; helpers/tests use only the standard library. Fixtures need Git, Bash, gzip, and bzip2; repository-assembly fixtures fake Debian scanners, checksum tools, and GPG.
+- All tests: `python3 -m unittest discover -s scripts -v`.
+- One module: `python3 -m unittest scripts.test_package_build_policy -v`; append `.ClassName.test_method` for one case.
+- Scoped hooks: `pre-commit run --files <changed-files>`. Changes under `scripts/`, `.github/workflows/`, or `.github/actions/` trigger the entire test suite.
 - Workflow validation: `actionlint .github/workflows/*.yaml`.
-- Known-good lint findings, do not "fix": actionlint flags the `ubuntu-26.04` runner label (its label table lags the chosen runners), and ruff reports two `TRY004`s in `package_catalog.py` and `publish_manifest.py` (`ValueError` is asserted by tests there).
-- Scoped hooks: `pre-commit run --files <changed-files>`.
-- Debian build-mode tests skip unless `dpkg-buildpackage` and `make` exist; macOS-only test success does not exercise real Debian builds. Static artifact validation also needs `dpkg` and `dpkg-deb`.
-- Upstream adaptation check: `VYOS_BUILD_ROOT=/path/to/patched/vyos-build/scripts/package-build python3 -m unittest scripts.test_prepare_package_build.UpstreamRecipeTests -v`. It uses temporary copies and does not compile packages; without that variable the check skips.
+- Known baseline lint findings, do not "fix": actionlint's unknown `ubuntu-26.04` label; Ruff's two `TRY004`s in `scripts/package_catalog.py` and `scripts/publish_manifest.py` (retain the `ValueError` validation contract).
+- Debian build-mode tests skip without `dpkg-buildpackage` and `make`; macOS success does not exercise real Debian builds. Static package validation needs `dpkg` and `dpkg-deb`.
+- Upstream audits: `VYOS_BUILD_ROOT=/path/to/patched/vyos-build/scripts/package-build python3 -m unittest scripts.test_prepare_package_build.UpstreamRecipeTests scripts.test_package_sources.UpstreamSourceTests -v`. Temporary copies only, no upstream compilation; skips without `VYOS_BUILD_ROOT`.

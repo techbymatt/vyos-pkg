@@ -54,6 +54,21 @@ class PublishManifestTests(unittest.TestCase):
                 "deps": "",
             },
         ]
+        for row in self.rows:
+            source = {
+                "recipe_tree": self.revision if row["group"] == "build" else None,
+                "inputs": {},
+                "repositories": [
+                    {
+                        "name": row["package"],
+                        "url": f"https://github.com/vyos/{row['package']}.git",
+                        "ref": "rolling",
+                        "commit": row["commit"],
+                    }
+                ],
+            }
+            row["source"] = source
+            row["source_digest"] = pm.package_sources.fingerprint(source)
         self.write_rows(self.rows)
 
     def write_rows(self, rows: list[dict]) -> None:
@@ -184,6 +199,44 @@ class PublishManifestTests(unittest.TestCase):
         changed["packages"][0]["commit"] = "2" * 40
         self.assert_changed(changed)
 
+    def test_changed_cloned_revision_triggers_publication(self) -> None:
+        """A moving recipe ref matters even when its recipe revision is unchanged."""
+        changed = self.create()
+        source = changed["packages"][0]["source"]
+        source["repositories"][0]["commit"] = "e" * 40
+        changed["packages"][0]["source_digest"] = pm.package_sources.fingerprint(source)
+        self.assert_changed(changed)
+
+    def test_legacy_manifests_remain_readable(self) -> None:
+        """Exact schema v1 remains available as legacy producer metadata."""
+        legacy = self.create()
+        legacy["schema_version"] = 1
+        for entry in legacy["packages"]:
+            del entry["source"]
+            del entry["source_digest"]
+        self.current.write_text(json.dumps(legacy))
+        self.assertEqual(pm.load_manifest(self.current)["schema_version"], 1)
+        self.assertTrue(
+            all(
+                "source" not in row
+                for row in pm.load_manifest(self.current)["packages"]
+            )
+        )
+
+    def test_source_fingerprint_and_build_group_are_validated(self) -> None:
+        """Inconsistent source metadata cannot authorize publication or migration."""
+        malformed = self.create()
+        malformed["packages"][0]["source_digest"] = "f" * 64
+        self.assert_malformed(json.dumps(malformed))
+        malformed = self.create()
+        malformed["packages"][0]["source"]["repositories"] = None
+        self.assert_malformed(json.dumps(malformed))
+        malformed = self.create()
+        entry = malformed["packages"][0]
+        entry["source"]["recipe_tree"] = None
+        entry["source_digest"] = pm.package_sources.fingerprint(entry["source"])
+        self.assert_malformed(json.dumps(malformed))
+
     def test_missing_manifest_field(self) -> None:
         """A missing manifest field fails schema validation."""
         malformed = dict(self.create())
@@ -197,7 +250,7 @@ class PublishManifestTests(unittest.TestCase):
     def test_duplicate_json_key(self) -> None:
         """Duplicate JSON keys are rejected."""
         text = json.dumps(self.create()).replace(
-            '"schema_version": 1', '"schema_version": 1, "schema_version": 1'
+            '"schema_version": 2', '"schema_version": 2, "schema_version": 2'
         )
         self.assert_malformed(text)
 

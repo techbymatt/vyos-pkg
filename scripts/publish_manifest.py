@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Track recorded publish inputs, not live apt or moving upstream state.
+"""Track publication inputs and the exact source inputs of every package.
 
 Repository revisions cover workflow/configuration (including Go configuration).
+Schema v2 also records patched recipe identities and resolved external Git refs;
+schema v1 remains readable for legacy-cache migration. Live APT is not locked.
 Canonical JSON is UTF-8, sorted object keys, compact separators, a trailing newline,
 with packages sorted by (group, package, arch). Dependency text is preserved.
 The signing key input must be the PUBLIC key file; its exact bytes are hashed.
@@ -15,7 +17,12 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
+
+try:
+    from . import package_sources
+except ImportError:
+    import package_sources
 
 
 class Package(TypedDict):
@@ -26,6 +33,8 @@ class Package(TypedDict):
     arch: str
     commit: str
     deps: str
+    source: NotRequired[dict]
+    source_digest: NotRequired[str]
 
 
 class Manifest(TypedDict):
@@ -57,7 +66,7 @@ def package_identity(package: Package) -> tuple[str, str, str]:
 
 
 def validate_manifest(value: object) -> Manifest:
-    """Validate exact v1 shapes/types and return a sorted manifest copy."""
+    """Validate exact v1/v2 shapes/types and return a sorted manifest copy."""
     fields = {
         "schema_version",
         "repository_commit",
@@ -67,8 +76,9 @@ def validate_manifest(value: object) -> Manifest:
         "packages",
     }
     if not isinstance(value, dict) or set(value) != fields:
-        raise ValueError("manifest must contain exactly the schema v1 fields")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("manifest must contain exactly the publication fields")
+    schema = value["schema_version"]
+    if type(schema) is not int or schema not in (1, 2):
         raise ValueError("unsupported schema_version")
     repository_commit = require_pattern(
         value["repository_commit"], REVISION, "repository_commit"
@@ -83,17 +93,12 @@ def validate_manifest(value: object) -> Manifest:
         raise ValueError("packages must be a non-empty array")
     packages: list[Package] = []
     seen: set[tuple[str, str, str]] = set()
+    package_fields = {"group", "package", "arch", "commit", "deps"}
+    if schema == 2:
+        package_fields |= {"source", "source_digest"}
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != {
-            "group",
-            "package",
-            "arch",
-            "commit",
-            "deps",
-        }:
-            raise ValueError(
-                "package must contain exactly group/package/arch/commit/deps"
-            )
+        if not isinstance(entry, dict) or set(entry) != package_fields:
+            raise ValueError("package must contain exactly the schema's package fields")
         group = require_pattern(entry["group"], r"build(?:-extra)?", "package group")
         arch = require_pattern(entry["arch"], r"amd64|arm64", "package arch")
         name = require_pattern(entry["package"], PACKAGE_NAME, "package name")
@@ -106,13 +111,30 @@ def validate_manifest(value: object) -> Manifest:
         package = Package(
             group=group, package=name, arch=arch, commit=commit, deps=deps
         )
+        if schema == 2:
+            try:
+                source = package_sources.validate_source(entry["source"])
+            except TypeError as error:
+                raise ValueError("invalid package source") from error
+            digest = require_pattern(entry["source_digest"], HEX256, "source digest")
+            if digest != package_sources.fingerprint(source):
+                raise ValueError("source digest does not match its inputs")
+            if (source["recipe_tree"] is None) != (group == "build-extra"):
+                raise ValueError("source recipe tree does not match the build group")
+            if group == "build-extra" and (
+                source["repositories"][0]["name"] != name
+                or source["repositories"][0]["commit"] != commit
+            ):
+                raise ValueError("standalone source does not match its checkout")
+            package["source"] = source
+            package["source_digest"] = digest
         identity = package_identity(package)
         if identity in seen:
             raise ValueError(f"duplicate package: {identity}")
         seen.add(identity)
         packages.append(package)
     return Manifest(
-        schema_version=1,
+        schema_version=schema,
         repository_commit=repository_commit,
         patch_commit=patch_commit,
         image=image,
@@ -131,7 +153,7 @@ def create_manifest(
     """Create publication inputs from source records, independent of cache state."""
     return validate_manifest(
         Manifest(
-            schema_version=1,
+            schema_version=2,
             repository_commit=repository_commit,
             patch_commit=patch_commit,
             image=image,

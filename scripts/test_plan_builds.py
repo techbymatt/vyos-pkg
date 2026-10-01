@@ -17,24 +17,37 @@ except ImportError:
     import plan_builds as planner
 
 REVISION = "a" * 40
-NAMESPACE = "b" * 64
 IMAGE = "ghcr.io/example/build@sha256:" + "c" * 64
 
 
 def record(name="frr", arch="amd64", group="build", deps=""):
     """Build a minimal source record row."""
+    source = {
+        "recipe_tree": REVISION if group == "build" else None,
+        "inputs": {},
+        "repositories": [
+            {
+                "name": name,
+                "url": f"https://github.com/vyos/{name}.git",
+                "ref": "rolling",
+                "commit": REVISION,
+            }
+        ],
+    }
     return {
         "group": group,
         "package": name,
         "arch": arch,
         "commit": REVISION,
         "deps": deps,
+        "source": source,
+        "source_digest": planner.package_sources.fingerprint(source),
     }
 
 
 def cache_key(row, run="122-1"):
     """Build the deterministic cache key for a record row."""
-    return f"cache-v2-{row['package']}-{row['arch']}-{REVISION}-{NAMESPACE}-{run}"
+    return f"cache-v3-{row['group']}-{row['package']}-{row['arch']}-{row['source_digest']}-{run}"
 
 
 class TestPlannerTests(unittest.TestCase):
@@ -162,7 +175,7 @@ class PublishPlannerTests(unittest.TestCase):
         """Cache misses plan grouped builds with deps and runner labels intact."""
         rows = [record(), record("hvinfo", "arm64", "build-extra", "gnat gprbuild")]
         before = copy.deepcopy(rows)
-        result = planner.plan_publish(rows, [], NAMESPACE, "123-1")
+        result = planner.plan_publish(rows, [], "123-1")
         self.assertEqual(result["restore-matrix"], {"include": []})
         self.assertEqual(
             result["build-matrix"]["include"],
@@ -172,6 +185,8 @@ class PublishPlannerTests(unittest.TestCase):
                     "package": "frr",
                     "arch": "amd64",
                     "commit": REVISION,
+                    "source": rows[0]["source"],
+                    "source_digest": rows[0]["source_digest"],
                     "runner_label": "ubuntu-26.04",
                     "cache_key": cache_key(rows[0], "123-1"),
                 }
@@ -212,24 +227,20 @@ class PublishPlannerTests(unittest.TestCase):
             },
         ]
         keys = planner.visible_cache_keys(caches, "refs/heads/topic", "main")
-        result = planner.plan_publish([row], keys, NAMESPACE, "123-1")
+        result = planner.plan_publish([row], keys, "123-1")
         self.assertEqual(
             result["restore-matrix"]["include"][0]["entries"][0]["cache_key"],
             cache_key(row, "new"),
         )
         self.assertEqual(result["build-matrix"]["include"], [])
-        result = planner.plan_publish(
-            [row], ["not-" + cache_key(row)], NAMESPACE, "123-1"
-        )
+        result = planner.plan_publish([row], ["not-" + cache_key(row)], "123-1")
         self.assertEqual(len(result["build-matrix"]["include"]), 1)
 
     def test_force_refresh_and_unchanged_inputs(self) -> None:
         """Unchanged inputs skip all work unless force_rebuild is set."""
         row = record()
         for keys in ([], [cache_key(row)]):
-            result = planner.plan_publish(
-                [row], keys, NAMESPACE, "123-1", changed=False
-            )
+            result = planner.plan_publish([row], keys, "123-1", changed=False)
             self.assertTrue(
                 all(
                     result[name] == {"include": []}
@@ -238,7 +249,7 @@ class PublishPlannerTests(unittest.TestCase):
             )
             self.assertEqual(result["verify-plan"], [])
             result = planner.plan_publish(
-                [row], keys, NAMESPACE, "123-1", changed=False, force_rebuild=True
+                [row], keys, "123-1", changed=False, force_rebuild=True
             )
             self.assertEqual(
                 result["build-matrix"]["include"][0]["cache_key"],
@@ -255,9 +266,7 @@ class PublishPlannerTests(unittest.TestCase):
             for arch in ("amd64", "arm64")
         ]
         keys = [cache_key(row) for row in rows]
-        batches = planner.plan_publish(rows, keys, NAMESPACE, "123-1")[
-            "restore-matrix"
-        ]["include"]
+        batches = planner.plan_publish(rows, keys, "123-1")["restore-matrix"]["include"]
         self.assertEqual([len(batch["entries"]) for batch in batches], [8, 1, 8, 1])
         self.assertEqual(
             [batch["runner_label"] for batch in batches],
@@ -277,14 +286,82 @@ class PublishPlannerTests(unittest.TestCase):
     def test_verify_plan_covers_build_and_restored_records(self) -> None:
         """Every planned producer contributes exactly one expected directory."""
         rows = [record(), record("hvinfo", "arm64", "build-extra", "gnat gprbuild")]
-        result = planner.plan_publish(rows, [cache_key(rows[0])], NAMESPACE, "123-1")
+        result = planner.plan_publish(rows, [cache_key(rows[0])], "123-1")
         self.assertEqual(result["verify-plan"], ["deb-frr-amd64", "deb-hvinfo-arm64"])
+
+    def test_source_change_rebuilds_only_that_sources_architectures(self) -> None:
+        """A recipe or cloned revision change leaves unrelated cache hits intact."""
+        before = [
+            record(name, arch)
+            for name in ("frr", "other")
+            for arch in ("amd64", "arm64")
+        ]
+        keys = [cache_key(row) for row in before]
+        for field in ("recipe_tree", "repository_commit"):
+            with self.subTest(input=field):
+                rows = copy.deepcopy(before)
+                for row in rows:
+                    if row["package"] == "frr":
+                        if field == "recipe_tree":
+                            row["source"]["recipe_tree"] = "c" * 40
+                        else:
+                            row["source"]["repositories"][0]["commit"] = "c" * 40
+                        row["source_digest"] = planner.package_sources.fingerprint(
+                            row["source"]
+                        )
+                result = planner.plan_publish(rows, keys, "123-1")
+                self.assertEqual(
+                    [
+                        (entry["package"], entry["arch"])
+                        for entry in result["build-matrix"]["include"]
+                    ],
+                    [("frr", "amd64"), ("frr", "arm64")],
+                )
+                self.assertEqual(
+                    [
+                        entry["package"]
+                        for batch in result["restore-matrix"]["include"]
+                        for entry in batch["entries"]
+                    ],
+                    ["other", "other"],
+                )
+
+    def test_local_dependencies_do_not_invalidate_source_caches(self) -> None:
+        """Local prerequisites can republish without recompiling unchanged sources."""
+        row = record("hvinfo", group="build-extra", deps="gnat")
+        key = cache_key(row)
+        row["deps"] = "gnat gprbuild"
+        result = planner.plan_publish([row], [key], "123-1")
+        self.assertEqual(result["build-extra-matrix"]["include"], [])
+        self.assertEqual(
+            result["restore-matrix"]["include"][0]["entries"][0]["cache_key"], key
+        )
+
+    def test_legacy_keys_require_proof_and_are_saved_under_source_keys(self) -> None:
+        """Ignoring the legacy namespace alone never authorizes cache reuse."""
+        row = record()
+        key = f"cache-v2-frr-amd64-{REVISION}-{'b' * 64}-122-1"
+        result = planner.plan_publish([row], [key], "123-1")
+        self.assertEqual(len(result["build-matrix"]["include"]), 1)
+        proven = {("build", "frr", "amd64"): key}
+        result = planner.plan_publish([row], [key], "123-1", legacy_matches=proven)
+        entry = result["restore-matrix"]["include"][0]["entries"][0]
+        self.assertEqual(entry["cache_key"], key)
+        self.assertEqual(entry["save_cache_key"], cache_key(row, "123-1"))
+        result = planner.plan_publish(
+            [row], [key], "123-1", legacy_matches=proven, force_rebuild=True
+        )
+        self.assertEqual(result["restore-matrix"]["include"], [])
 
     def test_source_records_cover_catalog_policy(self) -> None:
         """Every catalog source yields a record; missing revisions are rejected."""
         sources = planner.catalog.load_catalog()
         revisions = {
-            (group, entry["name"]): REVISION
+            (group, entry["name"]): {
+                key: value
+                for key, value in record(entry["name"], group=group).items()
+                if key in ("commit", "source", "source_digest")
+            }
             for group in sources
             for entry in sources[group]
         }
@@ -296,7 +373,7 @@ class PublishPlannerTests(unittest.TestCase):
         self.assertEqual(
             [r["deps"] for r in rows if r["package"] == "hvinfo"], ["gnat gprbuild"] * 2
         )
-        revisions["build", "frr"] = ""
+        revisions["build", "frr"]["commit"] = ""
         with self.assertRaisesRegex(ValueError, "revision"):
             planner.source_records(sources, revisions)
 
@@ -334,19 +411,30 @@ class PublishBoundaryTests(unittest.TestCase):
         )
         self.calls = []
         self.published = None
+        self.caches = []
+        self.resolved = {
+            (group, name): {
+                key: value
+                for key, value in record(name, group=group).items()
+                if key in ("commit", "source", "source_digest")
+            }
+            for group, name in (
+                ("build", "linux-kernel"),
+                ("build", "pyhumps"),
+                ("build-extra", "hvinfo"),
+            )
+        }
 
     def output(self, command, cwd=None):
         """Record and stub git, gh, and curl command outputs."""
         self.calls.append((command, cwd))
         if command[0] == "git":
-            if command[1] == "ls-tree":
-                return "100644 blob abc\t scripts/package-build/build.py\n040000 tree def\tscripts/package-build/frr\n100644 blob ghi\tscripts/package-build/common.py"
-            if command[1] == "ls-remote":
-                return REVISION + "\trefs/heads/rolling"
             return REVISION
         if command[:2] == ["gh", "api"]:
             if "--paginate" in command:
-                return json.dumps([{"actions_caches": []}, {"actions_caches": []}])
+                return json.dumps(
+                    [{"actions_caches": self.caches}, {"actions_caches": []}]
+                )
             if command[2].endswith("/pages"):
                 return "https://example.org/repo/"
             return "main"
@@ -361,70 +449,29 @@ class PublishBoundaryTests(unittest.TestCase):
         with (
             patch.object(planner, "command_output", side_effect=self.output),
             patch.object(
-                planner.cache_namespace, "namespace", return_value=NAMESPACE
-            ) as namespace,
+                planner.package_sources, "resolve_sources", return_value=self.resolved
+            ) as resolution,
             redirect_stderr(io.StringIO()),
         ):
             result = planner.run_publish(self.args)
-        return result, namespace
+        return result, resolution
 
-    def test_publish_revision_namespace_and_download_boundaries(self) -> None:
-        """Pinning, namespacing, and manifest download use the expected calls."""
-        result, namespace = self.run_publish()
+    def test_publish_source_and_download_boundaries(self) -> None:
+        """Source resolution and manifest download use the expected boundaries."""
+        result, resolution = self.run_publish()
         self.assertTrue(result["changed"])
         self.assertEqual(result["patch-commit"], REVISION)
         self.assertEqual(len(result["build-matrix"]["include"]), 3)
         self.assertEqual(len(result["build-extra-matrix"]["include"]), 2)
-        namespace.assert_called_once_with(
-            IMAGE,
-            REVISION,
-            "100644 blob abc\t scripts/package-build/build.py\n100644 blob ghi\tscripts/package-build/common.py",
-            REVISION,
-            self.root,
+        resolution.assert_called_once()
+        reader, resolver, catalog, patch_commit = resolution.call_args.args
+        self.assertEqual(reader.patch_root, self.args.patch_root)
+        self.assertIsInstance(resolver, planner.package_sources.Resolver)
+        self.assertEqual(
+            catalog,
+            planner.catalog.load_catalog(self.root / "scripts/package_catalog.json"),
         )
-        self.assertIn(
-            (
-                [
-                    "git",
-                    "log",
-                    "-n",
-                    "1",
-                    "--format=%H",
-                    "--",
-                    "data/defaults.toml",
-                    "scripts/package-build/linux-kernel/",
-                ],
-                self.args.patch_root / "vyos-build",
-            ),
-            self.calls,
-        )
-        self.assertIn(
-            (
-                [
-                    "git",
-                    "log",
-                    "-n",
-                    "1",
-                    "--format=%H",
-                    "--",
-                    "scripts/package-build/pyhumps/",
-                ],
-                self.args.patch_root / "vyos-build",
-            ),
-            self.calls,
-        )
-        self.assertIn(
-            (
-                [
-                    "git",
-                    "ls-remote",
-                    "https://github.com/vyos/hvinfo.git",
-                    "refs/heads/rolling",
-                ],
-                self.args.patch_root,
-            ),
-            self.calls,
-        )
+        self.assertEqual(patch_commit, REVISION)
         curl = next(command for command, _ in self.calls if command[0] == "curl")
         self.assertEqual(
             curl[-1], "https://example.org/repo/input-manifest.json?run=123-1"
@@ -432,6 +479,8 @@ class PublishBoundaryTests(unittest.TestCase):
         self.assertIn("Cache-Control: no-cache", curl)
         saved = planner.manifest.load_manifest(self.root / "input-manifest.json")
         self.assertEqual(len(saved["packages"]), 5)
+        self.assertEqual(saved["schema_version"], 2)
+        self.assertTrue(all("source_digest" in row for row in saved["packages"]))
         self.assertTrue(all("cache_key" not in row for row in saved["packages"]))
         self.assertEqual(
             result["verify-plan"],
@@ -463,22 +512,79 @@ class PublishBoundaryTests(unittest.TestCase):
         self.assertTrue(self.run_publish()[0]["changed"])
         self.assertFalse(any(command[0] == "curl" for command, _ in self.calls))
 
+    def test_image_change_republishes_only_restored_packages(self) -> None:
+        """A new build image changes publication inputs, never source cache keys."""
+        self.run_publish()
+        self.published = (self.root / "input-manifest.json").read_text()
+        rows = json.loads(self.published)["packages"]
+        self.caches = [
+            {
+                "key": cache_key(row),
+                "ref": "refs/heads/main",
+                "created_at": "2026-01-01",
+            }
+            for row in rows
+        ]
+        self.args.image = "ghcr.io/example/build@sha256:" + "e" * 64
+        result, _ = self.run_publish()
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["build-matrix"]["include"], [])
+        self.assertEqual(result["build-extra-matrix"]["include"], [])
+        self.assertEqual(
+            sum(len(batch["entries"]) for batch in result["restore-matrix"]["include"]),
+            5,
+        )
+
+    def test_verified_legacy_inputs_are_wired_to_the_restore_save_entry(self) -> None:
+        """Verified old archives migrate using the new source key in the same run."""
+        key = f"cache-v2-linux-kernel-amd64-{REVISION}-{'b' * 64}-122-1"
+        self.caches = [
+            {"key": key, "ref": "refs/heads/main", "created_at": "2026-01-01"}
+        ]
+        with patch.object(
+            planner.legacy_package_cache.LegacyVerifier,
+            "matches",
+            return_value={("build", "linux-kernel", "amd64"): key},
+        ) as proof:
+            result, _ = self.run_publish()
+        proof.assert_called_once()
+        entry = result["restore-matrix"]["include"][0]["entries"][0]
+        self.assertEqual(entry["cache_key"], key)
+        self.assertEqual(entry["save_cache_key"], cache_key(entry, "123-1"))
+
+    def test_forced_and_unchanged_publications_do_not_query_legacy_evidence(
+        self,
+    ) -> None:
+        """Source proof is only needed when publication will restore old archives."""
+        self.run_publish()
+        self.published = (self.root / "input-manifest.json").read_text()
+        with patch.object(
+            planner.legacy_package_cache.LegacyVerifier, "matches"
+        ) as proof:
+            self.assertFalse(self.run_publish()[0]["changed"])
+            self.args.force_rebuild = True
+            self.assertTrue(self.run_publish()[0]["changed"])
+        proof.assert_not_called()
+
     def test_invalid_deployed_manifest_republishes(self) -> None:
         """Broken or malformed deployed manifests trigger republication."""
         for text in ("{broken", "{}", '{"schema_version":1,"schema_version":1}'):
             self.published = text
             self.assertTrue(self.run_publish()[0]["changed"])
 
-    def test_missing_remote_revision_fails(self) -> None:
-        """Sources without a rolling revision raise ValueError."""
-        sources = planner.catalog.validate_catalog(
-            {"build": [], "build-extra": [{"name": "hvinfo"}]}
-        )
+    def test_missing_source_revision_fails_before_cache_planning(self) -> None:
+        """Source lookup failures stop publication, not trigger mass cache misses."""
         with (
-            patch.object(planner, "git", return_value=""),
-            self.assertRaisesRegex(ValueError, "rolling revision"),
+            patch.object(planner, "command_output", side_effect=self.output),
+            patch.object(
+                planner.package_sources,
+                "resolve_sources",
+                side_effect=ValueError("missing source ref"),
+            ),
+            self.assertRaisesRegex(ValueError, "missing source ref"),
         ):
-            planner.resolve_revisions(self.args.patch_root, sources)
+            planner.run_publish(self.args)
+        self.assertFalse(any(command[0] == "gh" for command, _ in self.calls))
 
     def test_cache_api_failure_is_not_treated_as_a_miss(self) -> None:
         """Cache API errors propagate instead of planning rebuilds."""
@@ -549,7 +655,9 @@ class PublishBoundaryTests(unittest.TestCase):
             )
         with (
             patch.object(planner, "command_output", side_effect=self.output),
-            patch.object(planner.cache_namespace, "namespace", return_value=NAMESPACE),
+            patch.object(
+                planner.package_sources, "resolve_sources", return_value=self.resolved
+            ),
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):

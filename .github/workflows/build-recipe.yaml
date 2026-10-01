@@ -101,8 +101,19 @@ jobs:
         with:
           key: ${{ matrix.cache_key }}
           path: ${{ steps.paths.outputs.cache }}
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.source != null }}
+        name: Pin recipe source revisions
+        env:
+          SOURCE_REVISIONS: ${{ toJSON(matrix.source.repositories) }}
+        run: |
+          python3 workflow/scripts/package_sources.py pin \
+            --root vyos-build/scripts/package-build \
+            --package "${{ matrix.package }}" --sources "$SOURCE_REVISIONS"
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/workflow/scripts${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
       - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         name: Build the package
+        env:
+          PACKAGE_SOURCE_REVISIONS: ${{ toJSON(matrix.source.repositories || null) }}
         run: python3 build.py
         working-directory: vyos-build/scripts/package-build/${{ matrix.package }}
       - name: Check and upload package artifacts

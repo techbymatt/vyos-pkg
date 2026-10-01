@@ -19,7 +19,8 @@ from urllib.parse import quote
 
 try:
     from . import (
-        cache_namespace,
+        legacy_package_cache,
+        package_sources,
     )
     from . import (
         package_catalog as catalog,
@@ -28,8 +29,9 @@ try:
         publish_manifest as manifest,
     )
 except ImportError:
-    import cache_namespace
+    import legacy_package_cache
     import package_catalog as catalog
+    import package_sources
     import publish_manifest as manifest
 
 RESTORE_BATCH_SIZE = 8
@@ -88,15 +90,22 @@ def plan_test(
     return result
 
 
-def source_records(sources: dict, revisions: dict[tuple[str, str], str]) -> list[dict]:
-    """Expand catalog sources into per-architecture records with resolved commits."""
+def source_records(sources: dict, revisions: dict[tuple[str, str], dict]) -> list[dict]:
+    """Expand resolved source fingerprints into per-architecture records."""
     records = []
     for group in catalog.GROUPS:
         for source in sources[group]:
             name = source["name"]
+            resolved = revisions[group, name]
             commit = manifest.require_pattern(
-                revisions[group, name], manifest.REVISION, f"{group}/{name} revision"
+                resolved["commit"], manifest.REVISION, f"{group}/{name} revision"
             )
+            inputs = package_sources.validate_source(resolved["source"])
+            digest = package_sources.fingerprint(inputs)
+            if resolved["source_digest"] != digest:
+                raise ValueError(
+                    f"{group}/{name} source fingerprint does not match inputs"
+                )
             for arch in catalog.architectures(group, name, sources):
                 records.append(
                     {
@@ -105,6 +114,8 @@ def source_records(sources: dict, revisions: dict[tuple[str, str], str]) -> list
                         "arch": arch,
                         "commit": commit,
                         "deps": " ".join(source["deps"]),
+                        "source": inputs,
+                        "source_digest": digest,
                     }
                 )
     return records
@@ -118,14 +129,19 @@ def visible_cache_keys(caches: list[dict], ref: str, default_branch: str) -> lis
     ]
 
 
+def cache_prefix(record: dict) -> str:
+    """Identify one source/architecture's outputs independently of build tooling."""
+    return package_sources.cache_prefix(record)
+
+
 def plan_publish(
     records: list[dict],
     cached_keys: list[str],
-    namespace: str,
     run: str,
     *,
     changed: bool = True,
     force_rebuild: bool = False,
+    legacy_matches: dict[tuple[str, str, str], str] | None = None,
 ) -> dict:
     """Route records into build and restore matrices, batching cache hits per runner."""
     result = {
@@ -137,20 +153,21 @@ def plan_publish(
         return result
     hits: dict[str, list[dict]] = {}
     for record in records:
-        prefix = (
-            f"cache-v2-{record['package']}-{record['arch']}-"
-            f"{record['commit']}-{namespace}-"
-        )
+        prefix = cache_prefix(record)
         key = (
             None
             if force_rebuild
             else next((key for key in cached_keys if key.startswith(prefix)), None)
         )
+        if key is None and not force_rebuild:
+            key = (legacy_matches or {}).get(manifest.package_identity(record))
         entry = dict(
             record,
             runner_label=runner_label(record["arch"]),
             cache_key=key or prefix + run,
         )
+        if key and key.startswith("cache-v2-"):
+            entry["save_cache_key"] = prefix + run
         if not entry["deps"]:
             del entry["deps"]
         if key:
@@ -200,44 +217,6 @@ def command_output(arguments: list[str], cwd: Path | None = None) -> str:
 def git(root: Path, *arguments: str) -> str:
     """Run a git command in a repository and return its stripped stdout."""
     return command_output(["git", *arguments], cwd=root)
-
-
-def resolve_revisions(patch_root: Path, sources: dict) -> dict[tuple[str, str], str]:
-    """Resolve each source commit from the patched submodule or upstream remote."""
-    revisions = {}
-    for group in catalog.GROUPS:
-        for source in sources[group]:
-            name = source["name"]
-            if group == "build":
-                paths = [f"scripts/package-build/{name}/"]
-                if name == "linux-kernel":
-                    paths.insert(0, "data/defaults.toml")
-                commit = git(
-                    patch_root / "vyos-build",
-                    "log",
-                    "-n",
-                    "1",
-                    "--format=%H",
-                    "--",
-                    *paths,
-                )
-            else:
-                remote = git(
-                    patch_root,
-                    "ls-remote",
-                    f"https://github.com/vyos/{name}.git",
-                    "refs/heads/rolling",
-                )
-                fields = remote.split()
-                if len(fields) != 2 or fields[1] != "refs/heads/rolling":
-                    raise ValueError(
-                        f"missing or ambiguous rolling revision for {name}"
-                    )
-                commit = fields[0]
-            revisions[group, name] = manifest.require_pattern(
-                commit, manifest.REVISION, f"{name} revision"
-            )
-    return revisions
 
 
 def fetch_caches(repository: str, ref: str) -> list[str]:
@@ -309,44 +288,47 @@ def run_publish(args: argparse.Namespace) -> dict:
     """Plan publish inputs and matrices, writing input-manifest.json."""
     sources = catalog.load_catalog(args.workflow_root / "scripts/package_catalog.json")
     patch_commit = git(args.patch_root, "rev-parse", "HEAD")
-    shared = git(
-        args.patch_root / "vyos-build", "ls-tree", "HEAD", "scripts/package-build/"
-    )
-    shared = "\n".join(
-        line for line in shared.splitlines() if line.split()[1] != "tree"
-    )
-    namespace = cache_namespace.namespace(
-        args.image,
-        git(args.patch_root, "rev-parse", "HEAD:patches"),
-        shared,
-        git(args.patch_root / "vyos-build", "rev-parse", "HEAD:data"),
-        args.workflow_root,
-    )
-    records = source_records(sources, resolve_revisions(args.patch_root, sources))
-    current = manifest.create_manifest(
-        records,
-        args.repository_commit,
-        patch_commit,
-        args.image,
-        args.workflow_root / "vyos-pkg.asc",
-    )
-    (args.workflow_root / "input-manifest.json").write_bytes(
-        manifest.canonical_bytes(current)
-    )
-    keys = fetch_caches(args.repository, args.ref)
-    published = (
-        None if args.force_rebuild else fetch_published(args.repository, args.run)
-    )
-    changed = publication_changed(current, published, args.force_rebuild)
+    reader = package_sources.RecipeReader(args.patch_root)
+    resolver = package_sources.Resolver()
+    legacy_matches = {}
+    legacy_notes = {}
+    try:
+        records = source_records(
+            sources,
+            package_sources.resolve_sources(reader, resolver, sources, patch_commit),
+        )
+        current = manifest.create_manifest(
+            records,
+            args.repository_commit,
+            patch_commit,
+            args.image,
+            args.workflow_root / "vyos-pkg.asc",
+        )
+        (args.workflow_root / "input-manifest.json").write_bytes(
+            manifest.canonical_bytes(current)
+        )
+        keys = fetch_caches(args.repository, args.ref)
+        published = (
+            None if args.force_rebuild else fetch_published(args.repository, args.run)
+        )
+        changed = publication_changed(current, published, args.force_rebuild)
+        if changed and not args.force_rebuild:
+            verifier = legacy_package_cache.LegacyVerifier(
+                args.repository, reader, resolver
+            )
+            legacy_matches = verifier.matches(records, keys)
+            legacy_notes = verifier.reasons
+    finally:
+        resolver.close()
     result = {"patch-commit": patch_commit, "changed": changed}
     result.update(
         plan_publish(
             records,
             keys,
-            namespace,
             args.run,
             changed=changed,
             force_rebuild=args.force_rebuild,
+            legacy_matches=legacy_matches,
         )
     )
     print(
@@ -355,6 +337,38 @@ def run_publish(args: argparse.Namespace) -> dict:
     )
     for name in ("build-matrix", "build-extra-matrix", "restore-matrix"):
         print(f"{name}: {len(result[name]['include'])} jobs", file=sys.stderr)
+    previous = {
+        manifest.package_identity(record): record
+        for record in (published or {}).get("packages", [])
+    }
+    for name in ("build-matrix", "build-extra-matrix"):
+        for record in result[name]["include"]:
+            old = previous.get(manifest.package_identity(record), {})
+            note = legacy_notes.get(manifest.package_identity(record))
+            reason = (
+                "forced rebuild"
+                if args.force_rebuild
+                else "source inputs changed"
+                if old.get("source_digest") not in (None, record["source_digest"])
+                else f"legacy inputs unverified: {note}"
+                if note
+                else "matching source cache unavailable"
+            )
+            print(
+                f"{record['package']}/{record['arch']}: build ({reason})",
+                file=sys.stderr,
+            )
+    for batch in result["restore-matrix"]["include"]:
+        for record in batch["entries"]:
+            reason = (
+                "verified legacy inputs; migrating cache"
+                if "save_cache_key" in record
+                else "matching source inputs"
+            )
+            print(
+                f"{record['package']}/{record['arch']}: restore ({reason})",
+                file=sys.stderr,
+            )
     return result
 
 
@@ -393,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         for line in output_lines(result):
             print(line)
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
         print(f"plan_builds: {error}", file=sys.stderr)
         return 1
     return 0
