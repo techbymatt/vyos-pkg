@@ -8,18 +8,82 @@ import textwrap
 import unittest
 from pathlib import Path
 
-try:
-    from .cache_namespace import job_text
-except ImportError:
-    from cache_namespace import job_text
-
 ROOT = Path(__file__).parent.parent
 WORKFLOWS = ROOT / ".github/workflows"
 ACTIONS = ROOT / ".github/actions"
+JOB_PATTERN = re.compile(r"^  ([A-Za-z0-9_-]+):$")
+
+
+def job_text(workflow: str, job: str) -> str:
+    """Extract one job for workflow contract tests, independently of cache policy."""
+    lines = workflow.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        match = JOB_PATTERN.fullmatch(line)
+        if match is None:
+            continue
+        if start is None:
+            if match[1] == job:
+                start = index
+        else:
+            return "\n".join(lines[start:index]) + "\n"
+    if start is None:
+        raise ValueError(f"workflow job not found: {job}")
+    return "\n".join(lines[start:]) + "\n"
 
 
 class TestWorkflowTests(unittest.TestCase):
     """Workflow and action contracts shared by manual and publication runs."""
+
+    def test_job_text_boundaries_and_missing_jobs(self):
+        """The workflow helper includes the complete first and final job blocks."""
+        workflow = "jobs:\n  build:\n    steps: []\n  verify:\n    steps: []\n"
+        self.assertEqual(job_text(workflow, "build"), "  build:\n    steps: []\n")
+        self.assertEqual(job_text(workflow, "verify"), "  verify:\n    steps: []\n")
+        with self.assertRaisesRegex(ValueError, "workflow job not found"):
+            job_text(workflow, "publish")
+
+    def test_publish_recipe_sources_are_pinned_before_compilation(self):
+        """Only planned source descriptors enable exact recipe checkout pinning."""
+        text = (WORKFLOWS / "build-recipe.yaml").read_text()
+        self.assertIn(
+            "steps.cache.outputs.cache-hit != 'true' && matrix.source != null", text
+        )
+        self.assertIn(
+            "SOURCE_REVISIONS: ${{ toJSON(matrix.source.repositories) }}", text
+        )
+        self.assertIn(
+            "PACKAGE_SOURCE_REVISIONS: ${{ toJSON(matrix.source.repositories || null) }}",
+            text,
+        )
+        self.assertIn('--sources "$SOURCE_REVISIONS"', text)
+        self.assertIn("PYTHONPATH=$GITHUB_WORKSPACE/workflow/scripts", text)
+        self.assertLess(
+            text.index("prepare_package_build.py"), text.index("package_sources.py pin")
+        )
+        self.assertLess(
+            text.index("package_sources.py pin"), text.index("run: python3 build.py")
+        )
+
+    def test_restore_migration_requires_an_exact_hit_and_validated_outputs(self):
+        """Migrated caches preserve compression/paths and save only checked outputs."""
+        text = (ACTIONS / "restore-package/action.yaml").read_text()
+        self.assertIn(
+            "steps.restore.outputs.cache-hit == 'true' && fromJSON(inputs.entry).save_cache_key != null",
+            text,
+        )
+        self.assertIn("uses: actions/cache/save@", text)
+        self.assertIn("key: ${{ fromJSON(inputs.entry).save_cache_key }}", text)
+        self.assertEqual(text.count("path: ${{ steps.paths.outputs.cache }}"), 2)
+        self.assertLess(
+            text.index("name: Check and upload package artifacts"),
+            text.index("uses: actions/cache/save@"),
+        )
+        self.assertLess(
+            text.index("uses: actions/cache/save@"),
+            text.index("name: Clean up restored package files"),
+        )
+        self.assertNotIn("restore-keys:", text)
 
     def test_callers_share_build_implementations_and_choose_cache_policy(self):
         """Test and publish call reusable builds with different cache policy."""

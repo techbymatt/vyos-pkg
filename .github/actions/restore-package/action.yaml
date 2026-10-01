@@ -34,6 +34,12 @@ runs:
         group: ${{ fromJSON(inputs.entry).group }}
         package: ${{ fromJSON(inputs.entry).package }}
         arch: ${{ fromJSON(inputs.entry).arch }}
+    - name: Save the verified legacy build under its source key
+      if: ${{ steps.restore.outputs.cache-hit == 'true' && fromJSON(inputs.entry).save_cache_key != null }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        key: ${{ fromJSON(inputs.entry).save_cache_key }}
+        path: ${{ steps.paths.outputs.cache }}
     - name: Clean up restored package files
       if: ${{ always() }}
       shell: bash
