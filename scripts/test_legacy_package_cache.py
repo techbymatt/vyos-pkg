@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,6 +78,88 @@ class CheckoutEvidenceTests(unittest.TestCase):
             log, job(row), "vyos-1x", [{"name": "vyos-1x"}]
         )
         self.assertEqual(evidence["commits"], {})
+
+    def test_unrecorded_rolling_checkouts_in_the_migration_run_remain_unproven(self):
+        """All five moving-branch misses must retain their conservative fallback."""
+        for package, name in (
+            ("libnss-mapuser", "libnss-mapuser"),
+            ("libpam-radius-auth", "libpam-radius-auth"),
+            ("shim-signed", "shim-signed"),
+            ("tacacs", "libtacplus-map"),
+            ("vyos-1x", "vyos-1x"),
+        ):
+            row = {
+                "group": "build",
+                "package": package,
+                "arch": "amd64",
+                "commit": COMMIT,
+            }
+            log = checkout_log(COMMIT, name).replace(
+                f"HEAD is now at {COMMIT[:8]} built source", "Already on 'rolling'"
+            )
+            with self.subTest(package=package):
+                evidence = legacy.checkout_evidence(
+                    log, job(row), package, [{"name": name}]
+                )
+                self.assertEqual(evidence["commits"], {})
+
+    def test_hexadecimal_ref_notes_are_not_checkout_ids(self):
+        """The firmware date tag and hex-like branch names cannot create false conflicts."""
+        row = {
+            "group": "build",
+            "package": "linux-kernel",
+            "arch": "amd64",
+            "commit": COMMIT,
+        }
+        for ref in ("20260410", "deadbeef", COMMIT[:8]):
+            log = checkout_log(COMMIT, "linux-firmware", OTHER_COMMIT).replace(
+                "2026-10-01T00:10:02Z HEAD",
+                f"2026-10-01T00:10:01.9Z Note: switching to '{ref}'.\n"
+                "2026-10-01T00:10:02Z HEAD",
+            )
+            with self.subTest(ref=ref):
+                evidence = legacy.checkout_evidence(
+                    log, job(row), "linux-kernel", [{"name": "linux-firmware"}]
+                )
+                self.assertEqual(
+                    evidence["commits"], {"linux-firmware": OTHER_COMMIT[:8]}
+                )
+                without_head = log.replace(
+                    f"HEAD is now at {OTHER_COMMIT[:8]} built source",
+                    "Already on 'rolling'",
+                )
+                evidence = legacy.checkout_evidence(
+                    without_head, job(row), "linux-kernel", [{"name": "linux-firmware"}]
+                )
+                self.assertEqual(evidence["commits"], {})
+
+    def test_full_clone_ids_survive_a_following_abbreviated_head(self):
+        """Keep the strongest evidence, while still rejecting a genuinely different HEAD."""
+        row = {
+            "group": "build",
+            "package": "linux-kernel",
+            "arch": "amd64",
+            "commit": COMMIT,
+        }
+        log = checkout_log(COMMIT, "linux-firmware").replace(
+            "2026-10-01T00:10:02Z HEAD",
+            f"2026-10-01T00:10:01.9Z Note: switching to '{COMMIT}'.\n"
+            "2026-10-01T00:10:02Z HEAD",
+        )
+        evidence = legacy.checkout_evidence(
+            log, job(row), "linux-kernel", [{"name": "linux-firmware"}]
+        )
+        self.assertEqual(evidence["commits"], {"linux-firmware": COMMIT})
+        with self.assertRaisesRegex(ValueError, "ambiguous producer checkout"):
+            legacy.checkout_evidence(
+                log.replace(
+                    f"HEAD is now at {COMMIT[:8]} built source",
+                    f"HEAD is now at {OTHER_COMMIT[:8]} different source",
+                ),
+                job(row),
+                "linux-kernel",
+                [{"name": "linux-firmware"}],
+            )
 
     def test_multiple_sources_and_nested_tag_clone_are_associated_correctly(self):
         """The Kea packaging tag has distinct evidence from the main source."""
@@ -249,6 +332,19 @@ class LegacyVerifierTests(unittest.TestCase):
         current = sources.cache_prefix(self.row) + "123-1"
         self.assertEqual(self.verifier.matches([self.row], [current, self.key()]), {})
         self.api.assert_not_called()
+
+    def test_legacy_fallback_reasons_are_reported_only_with_the_final_plan(self):
+        """Do not print rejected candidate diagnostics ahead of the actual build reason."""
+        self.log = self.log.replace(
+            f"HEAD is now at {COMMIT[:8]} built source", "Already on 'rolling'"
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(self.verifier.matches([self.row], [self.key()]), {})
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn(
+            "did not record", self.verifier.reasons[("build", "frr", "amd64")]
+        )
 
     def test_standalone_cache_is_proven_by_its_recorded_external_commit(self):
         """Standalone caches need no inference about recipe-cloned branches."""

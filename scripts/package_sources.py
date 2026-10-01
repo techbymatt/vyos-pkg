@@ -32,6 +32,11 @@ REVISION = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 SHORT_REVISION = r"[0-9a-fA-F]{7,39}"
 PIN_ENV = "PACKAGE_SOURCE_REVISIONS"
 KEA_CLONE = "git clone --branch ${BRANCH} "
+KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
+    cd ../vpp/
+    ./build.py
+    cd ${CWD}
+fi"""
 GITLAB_HOSTS = {"salsa.debian.org", "gitlab.com", "gitlab.isc.org"}
 
 
@@ -355,17 +360,7 @@ class RecipeReader:
         directory = f"scripts/package-build/{package}"
         recipe_tree = revision(git(self.root, "rev-parse", f"{tree}:{directory}"))
         config = tomllib.loads(self.text(tree, f"{directory}/package.toml"))
-        repositories = []
-        for entry in config["packages"]:
-            url, ref = entry.get("scm_url", ""), entry.get("commit_id", "")
-            if url or ref:
-                repositories.append(
-                    {
-                        "name": catalog.validate_name(entry["name"]),
-                        "url": source_text(url, "URL"),
-                        "ref": source_text(ref, "ref"),
-                    }
-                )
+        repositories = recipe_repositories(config)
         if package == "isc-kea":
             repositories.append(
                 kea_repository(self.text(tree, f"{directory}/prebuild.sh"))
@@ -391,6 +386,13 @@ class RecipeReader:
             inputs["certificates"] = hashlib.sha256(
                 canonical_bytes(certificates)
             ).hexdigest()
+            if kernel_uses_vpp(config):
+                audit_kernel_vpp_build(
+                    self.text(tree, f"{directory}/build-accel-ppp-ng.sh")
+                )
+                nested = self.recipe("vpp", patch_commit)
+                inputs["vpp_recipe_tree"] = nested["recipe_tree"]
+                repositories.extend(nested["repositories"])
         return {
             "recipe_tree": recipe_tree,
             "inputs": inputs,
@@ -406,6 +408,35 @@ class RecipeReader:
         return revision(
             git(self.root, "log", "-n", "1", "--format=%H", upstream, "--", *paths)
         )
+
+
+def recipe_repositories(config: dict) -> list[dict]:
+    """Read declared Git sources while retaining their original version labels."""
+    repositories = []
+    for entry in config["packages"]:
+        url, ref = entry.get("scm_url", ""), entry.get("commit_id", "")
+        if url or ref:
+            repositories.append(
+                {
+                    "name": catalog.validate_name(entry["name"]),
+                    "url": source_text(url, "URL"),
+                    "ref": source_text(ref, "ref"),
+                }
+            )
+    return repositories
+
+
+def kernel_uses_vpp(config: dict) -> bool:
+    """Identify the kernel sub-build which consumes the sibling VPP recipe."""
+    return any(
+        entry.get("build_cmd") == "build_accel_ppp_ng" for entry in config["packages"]
+    )
+
+
+def audit_kernel_vpp_build(script: str) -> None:
+    """Require the audited sibling build rather than guessing a changed clone path."""
+    if script.count(KERNEL_VPP_BUILD) != 1:
+        raise ValueError("linux-kernel: expected one audited nested VPP build")
 
 
 def kea_repository(script: str) -> dict:
@@ -484,11 +515,14 @@ def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
     repositories = validate_repositories(repositories)
     directory = root / catalog.validate_name(package)
     config = tomllib.loads((directory / "package.toml").read_text())
-    expected = [
-        {"name": entry["name"], "url": entry["scm_url"], "ref": entry["commit_id"]}
-        for entry in config["packages"]
-        if entry.get("scm_url") or entry.get("commit_id")
-    ]
+    expected = recipe_repositories(config)
+    nested = []
+    if package == "linux-kernel" and kernel_uses_vpp(config):
+        audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
+        nested = recipe_repositories(
+            tomllib.loads((root / "vpp/package.toml").read_text())
+        )
+        expected.extend(nested)
     if package == "isc-kea":
         expected.append(kea_repository((directory / "prebuild.sh").read_text()))
     actual = [
@@ -509,6 +543,16 @@ def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
         builder.write_text(
             text.replace(command, "checkout_source(repo_dir, scm_url, commit_id)")
         )
+        if any(
+            entry.get("build_cmd") == "build_intel_nic" for entry in config["packages"]
+        ):
+            # The declared tag was previously discarded immediately before
+            # compilation. Clean the pinned checkout, never a moving branch.
+            replace_once(
+                directory / "build-intel-nic.sh",
+                "\n    git reset --hard origin/main\n",
+                "\n    git reset --hard HEAD\n",
+            )
     else:
         if not builder.is_symlink() or os.readlink(builder) != "../build.py":
             raise ValueError(f"{package}: unaudited custom source builder")
@@ -523,6 +567,11 @@ def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
         "from subprocess import run, CalledProcessError",
         "from subprocess import run, CalledProcessError\nfrom package_sources import checkout_source",
     )
+    if nested:
+        names = {entry["name"] for entry in nested}
+        pin_recipe(
+            root, "vpp", [entry for entry in repositories if entry["name"] in names]
+        )
     if package == "isc-kea":
         repository = next(
             entry for entry in repositories if entry["name"] == "kea-packaging"

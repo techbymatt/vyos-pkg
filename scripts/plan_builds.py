@@ -219,8 +219,8 @@ def git(root: Path, *arguments: str) -> str:
     return command_output(["git", *arguments], cwd=root)
 
 
-def fetch_caches(repository: str, ref: str) -> list[str]:
-    """List cache keys visible to the workflow restore, newest first, via gh api."""
+def fetch_caches(repository: str, ref: str) -> tuple[list[str], list[dict]]:
+    """Return visible keys and inaccessible cache metadata for diagnostics only."""
     default_branch = command_output(
         ["gh", "api", f"repos/{repository}", "--jq", ".default_branch"]
     )
@@ -235,10 +235,14 @@ def fetch_caches(repository: str, ref: str) -> list[str]:
             ]
         )
     )
-    return visible_cache_keys(
-        [cache for page in pages for cache in page["actions_caches"]],
-        ref,
-        default_branch,
+    caches = [cache for page in pages for cache in page["actions_caches"]]
+    return (
+        visible_cache_keys(caches, ref, default_branch),
+        [
+            cache
+            for cache in caches
+            if cache["ref"] not in (ref, f"refs/heads/{default_branch}")
+        ],
     )
 
 
@@ -284,6 +288,67 @@ def fetch_published(repository: str, run: str) -> object:
         return None
 
 
+def source_changes(previous: dict, current: dict) -> list[str]:
+    """Describe changed source fields without confusing recipe and checkout SHAs."""
+    old, new = previous.get("source", {}), current["source"]
+    changes = []
+    if old.get("recipe_tree") != new["recipe_tree"]:
+        changes.append(f"recipe_tree: {old.get('recipe_tree')} -> {new['recipe_tree']}")
+    old_inputs, new_inputs = old.get("inputs", {}), new["inputs"]
+    for name in sorted(old_inputs.keys() | new_inputs.keys()):
+        before, after = old_inputs.get(name), new_inputs.get(name)
+        if before != after:
+            changes.append(f"{name}: {before} -> {after}")
+    old_repos = {entry["name"]: entry for entry in old.get("repositories", [])}
+    new_repos = {entry["name"]: entry for entry in new["repositories"]}
+    for name in sorted(old_repos.keys() | new_repos.keys()):
+        if name not in old_repos:
+            changes.append(f"{name}: repository added ({new_repos[name]['commit']})")
+        elif name not in new_repos:
+            changes.append(f"{name}: repository removed ({old_repos[name]['commit']})")
+        else:
+            for field in ("url", "ref", "commit"):
+                before, after = old_repos[name][field], new_repos[name][field]
+                if before != after:
+                    changes.append(f"{name} {field}: {before} -> {after}")
+    return changes
+
+
+def build_reason(
+    record: dict,
+    previous: dict,
+    inaccessible: list[dict],
+    ref: str,
+    *,
+    legacy_note: str | None = None,
+    force_rebuild: bool = False,
+) -> str:
+    """Explain the final build decision; rejected legacy fallbacks are secondary."""
+    if force_rebuild:
+        return "forced rebuild"
+    reasons = []
+    changed = previous.get("source_digest") not in (None, record["source_digest"])
+    if changed:
+        changes = source_changes(previous, record) or [
+            f"fingerprint: {previous['source_digest']} -> {record['source_digest']}"
+        ]
+        reasons.append("source inputs changed: " + ", ".join(changes))
+    refs = sorted(
+        {
+            cache["ref"]
+            for cache in inaccessible
+            if cache["key"].startswith(cache_prefix(record))
+        }
+    )
+    if refs:
+        reasons.append(
+            f"matching source cache inaccessible from {ref}: " + ", ".join(refs)
+        )
+    if legacy_note and not changed:
+        reasons.append("legacy migration requires an initial build: " + legacy_note)
+    return "; ".join(reasons) or "no matching visible source cache"
+
+
 def run_publish(args: argparse.Namespace) -> dict:
     """Plan publish inputs and matrices, writing input-manifest.json."""
     sources = catalog.load_catalog(args.workflow_root / "scripts/package_catalog.json")
@@ -307,7 +372,7 @@ def run_publish(args: argparse.Namespace) -> dict:
         (args.workflow_root / "input-manifest.json").write_bytes(
             manifest.canonical_bytes(current)
         )
-        keys = fetch_caches(args.repository, args.ref)
+        keys, inaccessible = fetch_caches(args.repository, args.ref)
         published = (
             None if args.force_rebuild else fetch_published(args.repository, args.run)
         )
@@ -345,14 +410,13 @@ def run_publish(args: argparse.Namespace) -> dict:
         for record in result[name]["include"]:
             old = previous.get(manifest.package_identity(record), {})
             note = legacy_notes.get(manifest.package_identity(record))
-            reason = (
-                "forced rebuild"
-                if args.force_rebuild
-                else "source inputs changed"
-                if old.get("source_digest") not in (None, record["source_digest"])
-                else f"legacy inputs unverified: {note}"
-                if note
-                else "matching source cache unavailable"
+            reason = build_reason(
+                record,
+                old,
+                inaccessible,
+                args.ref,
+                legacy_note=note,
+                force_rebuild=args.force_rebuild,
             )
             print(
                 f"{record['package']}/{record['arch']}: build ({reason})",
@@ -366,7 +430,7 @@ def run_publish(args: argparse.Namespace) -> dict:
                 else "matching source inputs"
             )
             print(
-                f"{record['package']}/{record['arch']}: restore ({reason})",
+                f"{record['package']}/{record['arch']}: restore ({reason}; cache {record['cache_key']})",
                 file=sys.stderr,
             )
     return result
