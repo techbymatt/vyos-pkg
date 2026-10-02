@@ -12,7 +12,6 @@ import io
 import json
 import re
 import subprocess
-import sys
 import time
 import zipfile
 from datetime import datetime
@@ -73,6 +72,8 @@ def checkout_evidence(
     Earlier workflow/submodule checkouts must not be confused with a moving
     source branch which emits no actual HEAD. --branch tag clones can emit
     'Note: switching to ...' instead of the common builder's 'HEAD is now at'.
+    Only full IDs in those notes are evidence: a hexadecimal-looking ref such
+    as the firmware tag '20260410' is not an abbreviated checkout ID.
     """
     steps = [step for step in job["steps"] if step["name"] == "Build the package"]
     if len(steps) != 1 or steps[0]["conclusion"] != "success":
@@ -105,14 +106,15 @@ def checkout_evidence(
             active = directories.get(PurePosixPath(clone[1]).name)
         checkout = re.match(r"HEAD is now at ([0-9a-f]{7,64})\b", text)
         if checkout is None:
-            checkout = re.match(r"Note: switching to '([0-9a-f]{7,64})'", text)
+            checkout = re.match(rf"Note: switching to '({sources.REVISION})'", text)
         if active and checkout:
             previous = commits.get(active)
             if previous is not None and not (
                 previous.startswith(checkout[1]) or checkout[1].startswith(previous)
             ):
                 raise ValueError(f"ambiguous producer checkout for {active}")
-            commits[active] = checkout[1]
+            # A following abbreviated HEAD must not discard a full clone ID.
+            commits[active] = max((previous or "", checkout[1]), key=len)
     if len(parent_refs) != 1:
         raise ValueError("producer patch checkout is missing or ambiguous")
     return {"patch_commit": parent_refs.pop(), "commits": commits}
@@ -330,9 +332,4 @@ class LegacyVerifier:
                 if self.verify(record, key):
                     result[identity] = key
                     break
-            if candidates:
-                print(
-                    f"{record['package']}/{record['arch']}: {self.reasons.get(identity, 'legacy inputs unverified')}",
-                    file=sys.stderr,
-                )
         return result

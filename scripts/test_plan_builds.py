@@ -236,6 +236,90 @@ class PublishPlannerTests(unittest.TestCase):
         result = planner.plan_publish([row], ["not-" + cache_key(row)], "123-1")
         self.assertEqual(len(result["build-matrix"]["include"]), 1)
 
+    def test_default_branch_cannot_restore_the_six_feature_branch_caches(self):
+        """Repository API visibility is not workflow restore visibility."""
+        names = (
+            "libnss-mapuser",
+            "libpam-radius-auth",
+            "linux-kernel",
+            "shim-signed",
+            "tacacs",
+            "vyos-1x",
+        )
+        rows = [
+            record(name, arch)
+            for name in names
+            for arch in (("amd64",) if name == "shim-signed" else ("amd64", "arm64"))
+        ]
+        caches = [
+            {
+                "key": cache_key(row),
+                "ref": "refs/heads/fix/ci/caching",
+                "created_at": "2026-10-01T10:00:00Z",
+            }
+            for row in rows
+        ]
+        keys = planner.visible_cache_keys(caches, "refs/heads/rolling", "rolling")
+        result = planner.plan_publish(rows, keys, "123-1")
+        self.assertEqual(len(result["build-matrix"]["include"]), 11)
+        self.assertEqual(result["restore-matrix"]["include"], [])
+        caches.extend(
+            dict(cache, ref="refs/heads/rolling", created_at="2026-10-01T12:00:00Z")
+            for cache in list(caches)
+        )
+        keys = planner.visible_cache_keys(caches, "refs/heads/rolling", "rolling")
+        result = planner.plan_publish(rows, keys, "124-1")
+        self.assertEqual(result["build-matrix"]["include"], [])
+        self.assertEqual(
+            sum(len(batch["entries"]) for batch in result["restore-matrix"]["include"]),
+            11,
+        )
+        self.assertEqual(len(result["verify-plan"]), 11)
+
+    def test_kernel_tracking_change_preserves_other_requested_source_caches(self):
+        """A complete kernel descriptor invalidates only the two kernel producers."""
+        names = (
+            "libnss-mapuser",
+            "libpam-radius-auth",
+            "linux-kernel",
+            "shim-signed",
+            "tacacs",
+            "vyos-1x",
+        )
+        rows = [
+            record(name, arch)
+            for name in names
+            for arch in (("amd64",) if name == "shim-signed" else ("amd64", "arm64"))
+        ]
+        keys = [cache_key(row) for row in rows]
+        for row in rows:
+            if row["package"] == "linux-kernel":
+                row["source"]["inputs"]["vpp_recipe_tree"] = "b" * 40
+                row["source"]["repositories"].append(
+                    {
+                        "name": "vpp",
+                        "url": "https://github.com/FDio/vpp",
+                        "ref": "stable/2510",
+                        "commit": "b" * 40,
+                    }
+                )
+                row["source_digest"] = planner.package_sources.fingerprint(
+                    row["source"]
+                )
+        result = planner.plan_publish(rows, keys, "123-1")
+        self.assertEqual(
+            [
+                (row["package"], row["arch"])
+                for row in result["build-matrix"]["include"]
+            ],
+            [("linux-kernel", "amd64"), ("linux-kernel", "arm64")],
+        )
+        self.assertEqual(
+            sum(len(batch["entries"]) for batch in result["restore-matrix"]["include"]),
+            9,
+        )
+        self.assertEqual(len(result["verify-plan"]), 11)
+
     def test_force_refresh_and_unchanged_inputs(self) -> None:
         """Unchanged inputs skip all work unless force_rebuild is set."""
         row = record()
@@ -378,6 +462,85 @@ class PublishPlannerTests(unittest.TestCase):
             planner.source_records(sources, revisions)
 
 
+class CacheDiagnosticTests(unittest.TestCase):
+    """Final decision reasons distinguish source changes, cache scope, and migration."""
+
+    def test_actual_source_changes_take_precedence_over_legacy_fallback_failures(self):
+        """Show the kernel version and cloned SHA, not a rejected old cache's missing log."""
+        old = record("linux-kernel")
+        old["source"]["inputs"]["kernel_version"] = "6.18.50"
+        old["source_digest"] = planner.package_sources.fingerprint(old["source"])
+        new = copy.deepcopy(old)
+        new["source"]["inputs"]["kernel_version"] = "6.18.54"
+        new["source"]["recipe_tree"] = "b" * 40
+        new["source"]["repositories"][0]["commit"] = "c" * 40
+        new["source_digest"] = planner.package_sources.fingerprint(new["source"])
+        reason = planner.build_reason(
+            new,
+            old,
+            [],
+            "refs/heads/rolling",
+            legacy_note="producer did not record the checkout",
+        )
+        self.assertIn("source inputs changed", reason)
+        self.assertIn("kernel_version: 6.18.50 -> 6.18.54", reason)
+        self.assertIn(f"recipe_tree: {REVISION} -> {'b' * 40}", reason)
+        self.assertIn(f"linux-kernel commit: {REVISION} -> {'c' * 40}", reason)
+        self.assertNotIn("did not record", reason)
+
+    def test_matching_hidden_cache_and_unproven_legacy_inputs_are_explained(self):
+        """An existing archive can be both inaccessible and lacking fallback proof."""
+        row = record()
+        caches = [
+            {"key": cache_key(row), "ref": "refs/heads/fix/ci/caching"},
+            {"key": "not-" + cache_key(row), "ref": "refs/heads/unrelated"},
+        ]
+        reason = planner.build_reason(
+            row,
+            row,
+            caches,
+            "refs/heads/rolling",
+            legacy_note="producer did not record the frr checkout",
+        )
+        self.assertIn(
+            "matching source cache inaccessible from refs/heads/rolling: refs/heads/fix/ci/caching",
+            reason,
+        )
+        self.assertIn(
+            "legacy migration requires an initial build: producer did not record the frr checkout",
+            reason,
+        )
+        self.assertNotIn("unrelated", reason)
+        self.assertEqual(
+            planner.build_reason(
+                row, row, caches, "refs/heads/rolling", force_rebuild=True
+            ),
+            "forced rebuild",
+        )
+        self.assertEqual(
+            planner.build_reason(row, row, [], "refs/heads/rolling"),
+            "no matching visible source cache",
+        )
+
+    def test_source_changes_identify_added_removed_and_changed_repositories(self):
+        """Report nested sources and ref/URL changes even when checkout SHAs match."""
+        old = record()
+        new = record("vpp")
+        changes = planner.source_changes(old, new)
+        self.assertIn(f"frr: repository removed ({REVISION})", changes)
+        self.assertIn(f"vpp: repository added ({REVISION})", changes)
+        new = copy.deepcopy(old)
+        new["source"]["repositories"][0].update(
+            url="https://example.org/frr.git", ref="v1"
+        )
+        changes = planner.source_changes(old, new)
+        self.assertIn(
+            "frr url: https://github.com/vyos/frr.git -> https://example.org/frr.git",
+            changes,
+        )
+        self.assertIn("frr ref: rolling -> v1", changes)
+
+
 class PublishBoundaryTests(unittest.TestCase):
     """Mocked git/GitHub/HTTP boundary tests for run_publish."""
 
@@ -446,14 +609,16 @@ class PublishBoundaryTests(unittest.TestCase):
 
     def run_publish(self):
         """Run run_publish against the stubbed command boundaries."""
+        stderr = io.StringIO()
         with (
             patch.object(planner, "command_output", side_effect=self.output),
             patch.object(
                 planner.package_sources, "resolve_sources", return_value=self.resolved
             ) as resolution,
-            redirect_stderr(io.StringIO()),
+            redirect_stderr(stderr),
         ):
             result = planner.run_publish(self.args)
+        self.diagnostics = stderr.getvalue()
         return result, resolution
 
     def test_publish_source_and_download_boundaries(self) -> None:
@@ -533,6 +698,34 @@ class PublishBoundaryTests(unittest.TestCase):
         self.assertEqual(
             sum(len(batch["entries"]) for batch in result["restore-matrix"]["include"]),
             5,
+        )
+        self.assertIn(
+            "restore (matching source inputs; cache cache-v3-", self.diagnostics
+        )
+
+    def test_hidden_matching_caches_are_only_used_for_diagnostics(self):
+        """The real publish boundary never passes inaccessible keys to migration or restore."""
+        self.run_publish()
+        rows = planner.manifest.load_manifest(self.root / "input-manifest.json")[
+            "packages"
+        ]
+        self.caches = [
+            {
+                "key": cache_key(row),
+                "ref": "refs/heads/fix/ci/caching",
+                "created_at": "2026-10-01",
+            }
+            for row in rows
+        ]
+        with patch.object(
+            planner.legacy_package_cache.LegacyVerifier, "matches", return_value={}
+        ) as proof:
+            result, _ = self.run_publish()
+        self.assertEqual(proof.call_args.args[1], [])
+        self.assertEqual(result["restore-matrix"]["include"], [])
+        self.assertIn(
+            "matching source cache inaccessible from refs/heads/topic: refs/heads/fix/ci/caching",
+            self.diagnostics,
         )
 
     def test_verified_legacy_inputs_are_wired_to_the_restore_save_entry(self) -> None:
@@ -632,7 +825,16 @@ class PublishBoundaryTests(unittest.TestCase):
         ) as output:
             self.assertEqual(
                 planner.fetch_caches("owner/repo", "refs/heads/topic"),
-                ["newer", "older"],
+                (
+                    ["newer", "older"],
+                    [
+                        {
+                            "key": "hidden",
+                            "ref": "refs/heads/other",
+                            "created_at": "2026-01-03",
+                        }
+                    ],
+                ),
             )
         self.assertIn("--paginate", output.call_args.args[0])
         self.assertIn("--slurp", output.call_args.args[0])

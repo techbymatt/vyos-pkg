@@ -16,13 +16,17 @@ The manifest is deployed together with the repository, so a failed build or depl
 Package caches are **source-specific**, keyed by build group, source package, architecture, and a fingerprint calculated by `scripts/package_sources.py`:
 
 - Recipe packages track the complete `vyos-build/scripts/package-build/<name>/` tree after applying the downstream patches, plus the resolved commits of every Git repository the recipe builds. The `vyos-build` revision remains the one pinned by `techbymatt/tbm-vyos-patch`.
-- Nested source clones are tracked too: for example, FRR builds both libyang and FRR, and Kea also clones its packaging repository.
-- Audited out-of-folder inputs affect only their consumer. The kernel tracks its effective `kernel_version`/`kernel_flavor` and the public certificates it embeds, rather than the entire upstream `data/` tree.
+- Nested source clones are tracked too: for example, FRR builds both libyang and FRR, Kea also clones its packaging repository, and the kernel's accel-PPP build consumes both VPP and `vyos-vpp-patches` from the sibling VPP recipe.
+- Audited out-of-folder inputs affect only their consumer. The kernel tracks its effective `kernel_version`/`kernel_flavor`, the public certificates it embeds, and the consumed VPP recipe tree, rather than the entire upstream `data/` or package-build trees.
 - Standalone packages track their external repository's `rolling` commit.
 
 The planner resolves branches, tags (including annotated tags), and abbreviated commits to full commits. Recipe builds use those exact planned revisions, even if a moving ref advances before compilation. Original ref labels are retained for package-version metadata. Changes to unrelated recipes, shared builders, build images, local workflows/helpers, or catalog prerequisites do not invalidate a package's source cache. A new or evicted source cache requires a build; `force_rebuild` remains an explicit override. CI logs report each source's build/restore decision.
 
+Kernel source pinning also adapts its nested VPP builder and prevents Intel driver cleanup from resetting a planned tag checkout to `origin/main`. Adding these previously untracked VPP inputs changes only kernel fingerprints and requires one initial kernel build; other matching source caches remain reusable.
+
 Existing namespaced caches are migrated conservatively by `scripts/legacy_package_cache.py`. It verifies the producer's inputs, historical patched recipe and scoped configuration, and recorded source checkouts before reuse. Verified archives are restored, checked, and saved under their source-specific key. Sources whose old checkouts cannot be proven (for example, moving branches whose commits were never logged) need an initial build. Schema-v1 producer manifests remain readable; new publications use schema v2 with complete source descriptors. Metadata-service outages fail planning instead of scheduling mass rebuilds.
+
+Cache visibility is separate from cache existence: workflows can restore their own branch's caches and default-branch caches, but the default branch cannot restore caches saved only on a feature branch. The planner preserves this isolation and explains inaccessible matching caches, legacy migration bootstrap builds, and actual source changes (including changed versions and checkout SHAs) in its final decisions.
 
 Live APT repositories and downloaded toolchains are not locked by source fingerprints. To refresh those inputs, or deliberately apply local build-policy/tooling changes to unchanged sources, run **Repository** manually with **force_rebuild** enabled. This bypasses all package caches and republishes after verification; later runs reuse the refreshed caches. Also use this option after rotating signing credentials, and update the checked-in public key when changing signing identity. Moving recipe Git refs are detected automatically.
 
