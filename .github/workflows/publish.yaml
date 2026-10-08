@@ -186,7 +186,7 @@ jobs:
       architectures: ${{ needs.cache-check.outputs.verify-arches }}
       expected-artifacts: ${{ needs.cache-check.outputs.verify-plan }}
   publish:
-    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && needs.verify.result == 'success' }}
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && github.ref == 'refs/heads/rolling' && needs.verify.result == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

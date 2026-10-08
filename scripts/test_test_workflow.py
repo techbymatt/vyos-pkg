@@ -415,6 +415,17 @@ class TestWorkflowTests(unittest.TestCase):
                     job_text(workflow, job),
                 )
 
+    def test_publication_requires_rolling_branch(self):
+        """Only the rolling branch can publish; tags and other branches do not match."""
+        text = job_text((WORKFLOWS / "publish.yaml").read_text(), "publish")
+        self.assertIn(
+            "    if: ${{ !cancelled()"
+            " && github.repository == 'techbymatt/vyos-pkg'"
+            " && github.ref == 'refs/heads/rolling'"
+            " && needs.verify.result == 'success' }}\n",
+            text,
+        )
+
     def test_publication_requires_successful_verification(self):
         """Publish gates on a successful verify job."""
         text = job_text((WORKFLOWS / "publish.yaml").read_text(), "publish")
