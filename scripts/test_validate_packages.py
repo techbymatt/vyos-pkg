@@ -7,6 +7,7 @@ import io
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -72,7 +73,12 @@ class ValidatePackagesTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 2, b"", b"fixture failure")
         if command[1] == "--field":
             return subprocess.CompletedProcess(
-                command, 0, self.metadata[command[3]].encode(), b""
+                command,
+                0,
+                "".join(
+                    f"{field}: {self.metadata[field]}\n" for field in command[3:]
+                ).encode(),
+                b"",
             )
         if command[1] == "--validate-version":
             return subprocess.CompletedProcess(command, 0, b"", b"")
@@ -188,7 +194,7 @@ class ValidatePackagesTests(unittest.TestCase):
         self.validate()
         self.assertEqual(
             [call.args[0][0] for call in self.tool.call_args_list],
-            ["dpkg-deb"] * 5 + ["dpkg", "dpkg-deb", "dpkg-deb"],
+            ["dpkg-deb", "dpkg", "dpkg-deb", "dpkg-deb"],
         )
         self.assertEqual(list(self.root.iterdir()), [self.package])
 
@@ -254,6 +260,87 @@ class ValidatePackagesTests(unittest.TestCase):
         duplicate = self.root / "duplicate.deb"
         duplicate.write_bytes(self.package.read_bytes())
         vp.validate_packages([self.package, duplicate], "amd64")
+
+    def test_required_metadata_uses_one_subprocess(self) -> None:
+        """All five required fields share one control-metadata invocation."""
+        self.validate()
+        commands = [
+            call.args[0]
+            for call in self.tool.call_args_list
+            if call.args[0][1] == "--field"
+        ]
+        self.assertEqual(
+            commands, [["dpkg-deb", "--field", str(self.package.resolve()), *vp.FIELDS]]
+        )
+
+    def test_metadata_rejects_duplicate_unknown_and_unattached_continuations(
+        self,
+    ) -> None:
+        """The batched metadata parser does not silently overwrite corrupt fields."""
+        for text in (
+            "Package: sample\npackage: different\n",
+            "Injected: value\n",
+            " continuation before any field\n",
+            "not a field\n",
+        ):
+            with (
+                self.subTest(text=text),
+                patch.object(vp, "run_tool", return_value=text.encode()),
+                self.assertRaises(ValueError),
+            ):
+                vp.read_metadata(self.package)
+
+    def test_multiline_metadata_is_allowed_only_for_description(self) -> None:
+        """Continuation lines cannot hide additional native identity/control values."""
+        for field in vp.FIELDS[:-1]:
+            with (
+                self.subTest(field=field),
+                patch.dict(self.metadata, {field: self.metadata[field] + "\n extra"}),
+                self.assertRaisesRegex(ValueError, "multiline metadata"),
+            ):
+                self.validate()
+
+    def test_parallel_validation_retains_cross_producer_identity_checks(self) -> None:
+        """Archive validation is concurrent, but conflicting identities still fail."""
+        barrier = threading.Barrier(2)
+        packages = [
+            (self.root / "first.deb", "amd64"),
+            (self.root / "second.deb", "amd64"),
+        ]
+
+        def validate(package):
+            barrier.wait(timeout=5)
+            return ("sample", "1.0-1", "amd64"), package[0].stem
+
+        with (
+            patch.object(vp, "validate_one", side_effect=validate),
+            self.assertRaisesRegex(ValueError, "second.deb.*differing SHA256"),
+        ):
+            vp._validate_packages(packages, jobs=2)
+
+    def test_parallel_validation_errors_follow_input_order(self) -> None:
+        """A fast later failure cannot make errors/reporting nondeterministic."""
+        barrier = threading.Barrier(2)
+        packages = [
+            (self.root / "first.deb", "amd64"),
+            (self.root / "second.deb", "amd64"),
+        ]
+
+        def validate(package):
+            barrier.wait(timeout=5)
+            raise ValueError(str(package[0]))
+
+        with (
+            patch.object(vp, "validate_one", side_effect=validate),
+            self.assertRaisesRegex(ValueError, "first.deb"),
+        ):
+            vp._validate_packages(packages, jobs=2)
+
+    def test_invalid_validation_concurrency(self) -> None:
+        """Invalid widths are rejected before any package inspection."""
+        for jobs in (0, -1, True, "4"):
+            with self.subTest(jobs=jobs), self.assertRaisesRegex(ValueError, "jobs"):
+                vp.validate_packages([self.package], "amd64", jobs=jobs)
 
     def test_conflicting_duplicates(self) -> None:
         """Duplicate paths with differing bytes raise a SHA256 error."""
@@ -451,6 +538,7 @@ class ValidatePackagesTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "expected artifacts must be"),
             ):
                 vp.validate_expected_artifacts(self.root, expected)
+
         for expected in (
             ["deb-sample-amd64", "deb-sample-amd64"],
             ["linux-amd64"],
@@ -461,6 +549,13 @@ class ValidatePackagesTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "expected artifact"),
             ):
                 vp.validate_expected_artifacts(self.root, expected)
+
+    def test_expected_artifacts_rejects_unplanned_producers(self) -> None:
+        """Expected-artifacts describes the exact producer set, not just a subset."""
+        self.artifact_package("deb-sample-amd64")
+        self.artifact_package("deb-unplanned-amd64")
+        with self.assertRaisesRegex(ValueError, "unexpected artifact directories"):
+            vp.validate_expected_artifacts(self.root, ["deb-sample-amd64"])
 
     def test_cli_expected_artifacts(self) -> None:
         """CLI enforces producer completeness before package validation."""

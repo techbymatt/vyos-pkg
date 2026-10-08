@@ -312,6 +312,31 @@ class PrepareTests(unittest.TestCase):
         self.recipe("net-snmp", 'build_cmd = "different command"\n')
         with self.assertRaisesRegex(ValueError, "expected exactly one audited command"):
             prepare.prepare(self.root, "net-snmp", "arm64")
+        self.assertEqual(
+            (self.root / "build.py").read_text(),
+            "dpkg-buildpackage -uc -us -tc -F --source-option\n",
+        )
+
+    def test_multiple_source_commands_are_checked_from_the_registry(self) -> None:
+        """The three tacacs dependency builds retain order and share one native mode."""
+        command = "dpkg-buildpackage -us -uc -tc -b"
+        path = self.recipe("tacacs", "\n".join([command] * 3))
+        prepare.prepare(self.root, "tacacs", "arm64")
+        self.assertEqual(path.read_text().count("--build=any"), 3)
+        self.assertNotIn(" -b", path.read_text())
+
+    def test_invalid_package_paths_and_architectures_fail_before_shared_edits(
+        self,
+    ) -> None:
+        """Direct helper callers receive the same safe input contract as the CLI."""
+        before = (self.root / "build.py").read_text()
+        for package, arch in (("../escape", "amd64"), ("frr", "riscv64")):
+            with (
+                self.subTest(package=package, arch=arch),
+                self.assertRaises(ValueError),
+            ):
+                prepare.prepare(self.root, package, arch)
+        self.assertEqual((self.root / "build.py").read_text(), before)
 
 
 @unittest.skipUnless(
@@ -323,20 +348,15 @@ class UpstreamRecipeTests(unittest.TestCase):
     def test_audited_adaptations_apply_to_real_recipes(self) -> None:
         """All audited adaptations apply cleanly to real upstream recipes."""
         source = Path(os.environ["VYOS_BUILD_ROOT"])
-        packages = (
-            "dropbear",
-            "frr",
-            "net-snmp",
-            "netfilter",
-            "openssl",
-            "openvpn",
-            "strongswan",
-            "tacacs",
-            "udp-broadcast-relay",
-            "xen-guest-agent",
-            "hostap",
-            "linux-kernel",
-            "vyos-1x",
+        packages = tuple(
+            dict.fromkeys(
+                [
+                    *prepare.BINARY_COMMANDS,
+                    *prepare.RECIPE_HOOKS,
+                    "linux-kernel",
+                    "vyos-1x",
+                ]
+            )
         )
         for arch in ("amd64", "arm64"):
             for package in packages:

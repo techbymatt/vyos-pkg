@@ -20,8 +20,18 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import BinaryIO
+
+try:
+    from .package_catalog import ARCHITECTURES
+    from .package_layout import artifact_arch
+    from .workflow_utils import positive_int
+except ImportError:
+    from package_catalog import ARCHITECTURES
+    from package_layout import artifact_arch
+    from workflow_utils import positive_int
 
 FIELDS = ("Package", "Version", "Architecture", "Maintainer", "Description")
 
@@ -40,6 +50,35 @@ def safe_path(name: str) -> str:
     if name.startswith("/") or ".." in name.split("/") or "\x00" in name:
         raise ValueError(f"unsafe archive path: {name!r}")
     return "/".join(part for part in name.split("/") if part not in ("", "."))
+
+
+def read_metadata(path: Path) -> dict[str, str]:
+    """Read required fields in one dpkg-deb process, preserving continuations."""
+    text = run_tool(["dpkg-deb", "--field", str(path), *FIELDS]).decode("utf-8")
+    names = {field.lower(): field for field in FIELDS}
+    metadata = {}
+    active = None
+    for line in text.splitlines():
+        if line.startswith((" ", "\t")):
+            if active is None:
+                raise ValueError("control metadata continuation without a field")
+            metadata[active] += "\n" + line
+            continue
+        field, separator, value = line.partition(":")
+        active = names.get(field.lower())
+        if not separator or active is None:
+            raise ValueError(f"malformed control metadata line: {line!r}")
+        if active in metadata:
+            raise ValueError(f"duplicate control metadata field: {active}")
+        metadata[active] = value.strip()
+    for field in FIELDS:
+        value = metadata.get(field, "").strip()
+        if not value:
+            raise ValueError(f"missing required metadata: {field}")
+        if field != "Description" and "\n" in value:
+            raise ValueError(f"multiline metadata: {field}")
+        metadata[field] = value
+    return metadata
 
 
 def read_archive(path: Path, option: str) -> tuple[dict[str, str], bytes | None]:
@@ -125,21 +164,24 @@ def verify_checksums(sums: bytes, digests: dict[str, str]) -> None:
             raise ValueError(f"md5sums checksum mismatch: {name}")
 
 
-def validate_packages(paths: list[Path], arch: str) -> None:
+def validate_packages(paths: list[Path], arch: str, *, jobs: int = 1) -> None:
     """Validate explicit .deb paths as one architecture, requiring at least one."""
-    if arch not in ("amd64", "arm64") or not paths:
+    if arch not in ARCHITECTURES or not paths:
         raise ValueError("expected amd64 or arm64 and at least one .deb path")
-    _validate_packages([(path, arch) for path in paths])
+    _validate_packages([(path, arch) for path in paths], jobs=jobs)
 
 
 def validate_artifacts(
-    directory: Path, expected_arches: tuple[str, ...] | list[str] = ("amd64", "arm64")
+    directory: Path,
+    expected_arches: tuple[str, ...] | list[str] = ARCHITECTURES,
+    *,
+    jobs: int = 1,
 ) -> None:
     """Validate unmerged downloads together, requiring exactly the planned arches."""
     if (
         not isinstance(expected_arches, (list, tuple))
         or not expected_arches
-        or any(arch not in ("amd64", "arm64") for arch in expected_arches)
+        or any(arch not in ARCHITECTURES for arch in expected_arches)
         or len(set(expected_arches)) != len(expected_arches)
     ):
         raise ValueError(
@@ -150,22 +192,20 @@ def validate_artifacts(
         for child in sorted(directory.iterdir()):
             if not child.is_dir():
                 continue
-            match = re.fullmatch(r"deb-.*-(amd64|arm64)", child.name)
-            if match is None:
-                raise ValueError(f"unknown artifact directory name: {child.name}")
-            if match[1] not in groups:
-                raise ValueError(f"unexpected artifact architecture group: {match[1]}")
+            arch = artifact_arch(child.name)
+            if arch not in groups:
+                raise ValueError(f"unexpected artifact architecture group: {arch}")
             paths = sorted(child.rglob("*.deb"))
             if not paths:
                 raise ValueError(f"empty artifact directory: {child.name}")
-            groups[match[1]].extend(paths)
+            groups[arch].extend(paths)
     except OSError as error:
         raise ValueError(f"{directory}: {error}") from error
     for arch, paths in groups.items():
         if not paths:
             raise ValueError(f"empty or missing artifact architecture group: {arch}")
     _validate_packages(
-        [(path, arch) for arch, paths in groups.items() for path in paths]
+        [(path, arch) for arch, paths in groups.items() for path in paths], jobs=jobs
     )
 
 
@@ -182,8 +222,10 @@ def validate_expected_artifacts(directory: Path, expected: list[str]) -> None:
         if name in seen:
             raise ValueError(f"duplicate expected artifact: {name}")
         seen.add(name)
-        if re.fullmatch(r"deb-.*-(amd64|arm64)", name) is None:
-            raise ValueError(f"invalid expected artifact name: {name}")
+        try:
+            artifact_arch(name)
+        except ValueError as error:
+            raise ValueError(f"invalid expected artifact name: {name}") from error
         path = directory / name
         try:
             if not path.is_dir() or not any(path.iterdir()):
@@ -192,58 +234,69 @@ def validate_expected_artifacts(directory: Path, expected: list[str]) -> None:
                 )
         except OSError as error:
             raise ValueError(f"{path}: {error}") from error
+    unexpected = sorted(
+        child.name
+        for child in directory.iterdir()
+        if child.is_dir() and child.name not in seen
+    )
+    if unexpected:
+        raise ValueError("unexpected artifact directories: " + ", ".join(unexpected))
 
 
-def _validate_packages(packages: list[tuple[Path, str]]) -> None:
-    """Validate each package, rejecting identical identities with differing bytes."""
+def validate_one(package: tuple[Path, str]) -> tuple[tuple[str, str, str], str]:
+    """Validate one immutable input without installing it or executing its scripts."""
+    original, arch = package
+    try:
+        path = original.resolve()
+        if path.suffix != ".deb" or not path.is_file():
+            raise ValueError("expected a regular .deb file")
+        with path.open("rb") as source:
+            sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+        metadata = read_metadata(path)
+        name, version, actual_arch = (metadata[field] for field in FIELDS[:3])
+        if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", name) is None:
+            raise ValueError(f"invalid Package name: {name}")
+        run_tool(["dpkg", "--validate-version", version])
+        if actual_arch not in (arch, "all"):
+            raise ValueError(
+                f"unexpected Architecture: {actual_arch} (wanted {arch} or all)"
+            )
+        if arch == "arm64" and actual_arch == "all":
+            raise ValueError("Architecture: all must be produced by amd64 only")
+        _, sums = read_archive(path, "--ctrl-tarfile")
+        digests, _ = read_archive(path, "--fsys-tarfile")
+        if sums is not None:
+            verify_checksums(sums, digests)
+        return (name, version, actual_arch), sha256
+    except (OSError, ValueError, tarfile.TarError) as error:
+        raise ValueError(f"{original}: {error}") from error
+
+
+def _validate_packages(packages: list[tuple[Path, str]], *, jobs: int = 1) -> None:
+    """Bound parallel archive IO; compare all identities in deterministic input order."""
+    if type(jobs) is not int or jobs < 1:
+        raise ValueError("validation jobs must be positive")
     seen: dict[tuple[str, str, str], str] = {}
-    for original, arch in packages:
-        try:
-            path = original.resolve()
-            if path.suffix != ".deb" or not path.is_file():
-                raise ValueError("expected a regular .deb file")
-            with path.open("rb") as source:
-                sha256 = hashlib.file_digest(source, "sha256").hexdigest()
-            metadata = {}
-            for field in FIELDS:
-                value = run_tool(["dpkg-deb", "--field", str(path), field])
-                metadata[field] = value.decode("utf-8").strip()
-                if not metadata[field]:
-                    raise ValueError(f"missing required metadata: {field}")
-                if field != "Description" and "\n" in metadata[field]:
-                    raise ValueError(f"multiline metadata: {field}")
-            name, version, actual_arch = (metadata[field] for field in FIELDS[:3])
-            if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", name) is None:
-                raise ValueError(f"invalid Package name: {name}")
-            run_tool(["dpkg", "--validate-version", version])
-            if actual_arch not in (arch, "all"):
-                raise ValueError(
-                    f"unexpected Architecture: {actual_arch} (wanted {arch} or all)"
-                )
-            if arch == "arm64" and actual_arch == "all":
-                raise ValueError("Architecture: all must be produced by amd64 only")
-            _, sums = read_archive(path, "--ctrl-tarfile")
-            digests, _ = read_archive(path, "--fsys-tarfile")
-            if sums is not None:
-                verify_checksums(sums, digests)
-            identity = (name, version, actual_arch)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        for (original, _), (identity, sha256) in zip(
+            packages, executor.map(validate_one, packages), strict=True
+        ):
             if identity in seen and seen[identity] != sha256:
                 raise ValueError(
-                    f"differing SHA256 bytes for package identity {identity}"
+                    f"{original}: differing SHA256 bytes for package identity {identity}"
                 )
             seen[identity] = sha256
-        except (OSError, ValueError, tarfile.TarError) as error:
-            raise ValueError(f"{original}: {error}") from error
 
 
 def main(argv: list[str] | None = None) -> int:
     """Dispatch the required --arch or --artifacts mode; return 1 on failure."""
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--arch", choices=("amd64", "arm64"))
+    mode.add_argument("--arch", choices=ARCHITECTURES)
     mode.add_argument("--artifacts", type=Path, metavar="DIRECTORY")
     parser.add_argument("--expected-arches", type=json.loads, metavar="JSON")
     parser.add_argument("--expected-artifacts", type=json.loads, metavar="JSON")
+    parser.add_argument("--jobs", type=positive_int, default=1)
     parser.add_argument("packages", type=Path, nargs="*")
     args = parser.parse_args(argv)
     if args.artifacts is not None and args.packages:
@@ -260,9 +313,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.artifacts is not None:
             if args.expected_artifacts is not None:
                 validate_expected_artifacts(args.artifacts, args.expected_artifacts)
-            validate_artifacts(args.artifacts, args.expected_arches)
+            validate_artifacts(args.artifacts, args.expected_arches, jobs=args.jobs)
         else:
-            validate_packages(args.packages, args.arch)
+            validate_packages(args.packages, args.arch, jobs=args.jobs)
     except ValueError as error:
         print(f"validate_packages: {error}", file=sys.stderr)
         return 1

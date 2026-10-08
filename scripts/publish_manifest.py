@@ -20,9 +20,11 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 try:
-    from . import package_sources
+    from . import source_identity as package_sources
+    from .workflow_utils import atomic_write, canonical_json
 except ImportError:
-    import package_sources
+    import source_identity as package_sources
+    from workflow_utils import atomic_write, canonical_json
 
 
 class Package(TypedDict):
@@ -182,15 +184,7 @@ def load_manifest(path: Path) -> Manifest:
 
 def canonical_bytes(manifest: Manifest) -> bytes:
     """Serialize a validated manifest to canonical UTF-8 JSON bytes."""
-    return (
-        json.dumps(
-            validate_manifest(manifest),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        + b"\n"
-    )
+    return canonical_json(validate_manifest(manifest)) + b"\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.image,
                 args.signing_key,
             )
-            args.output.write_bytes(canonical_bytes(manifest))
+            atomic_write(args.output, canonical_bytes(manifest))
         elif args.command == "compare":
             current = load_manifest(args.current)
             published = load_manifest(args.published)

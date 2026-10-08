@@ -182,6 +182,21 @@ class TestWorkflowTests(unittest.TestCase):
         publish = job_text((WORKFLOWS / "publish.yaml").read_text(), "cache-check")
         self.assertIn("persist-credentials: false", publish)
 
+    def test_tool_and_source_checkouts_never_leave_git_tokens_for_build_scripts(self):
+        """Source compilation cannot read persisted credentials from the tools checkout."""
+        for path in WORKFLOWS.glob("*.yaml"):
+            text = path.read_text()
+            # Extract action blocks directly, including steps with no name/id.
+            checkouts = re.findall(
+                r"uses: actions/checkout@[^\n]*\n(.*?)(?=\n      -|\n    (?:strategy|timeout-minutes):|\Z)",
+                text,
+                re.DOTALL,
+            )
+            self.assertTrue(checkouts, path.name)
+            for checkout in checkouts:
+                with self.subTest(workflow=path.name):
+                    self.assertIn("persist-credentials: false", checkout)
+
     def test_shared_output_policy_precedes_both_uploads(self):
         """Artifact uploads run after the output policy check."""
         text = (ACTIONS / "package-artifacts/action.yaml").read_text()
@@ -194,8 +209,10 @@ class TestWorkflowTests(unittest.TestCase):
         restore = (ACTIONS / "restore-package/action.yaml").read_text()
         self.assertIn("uses: ./workflow/.github/actions/package-artifacts", restore)
         self.assertIn("path: ${{ steps.paths.outputs.cache }}", restore)
-        self.assertIn("CACHE_PATHS: ${{ steps.paths.outputs.cache }}", restore)
-        self.assertIn('>"$shim/zstd"', restore)
+        self.assertIn('package_layout.py" clean', restore)
+        self.assertIn(
+            "uses: ./workflow/.github/actions/package-cache-compression", restore
+        )
         self.assertNotIn("fail-on-cache-miss", restore)
         self.assertIn("id: restore\n", restore)
         self.assertIn("steps.restore.outputs.cache-hit == 'true'", restore)
@@ -215,6 +232,7 @@ class TestWorkflowTests(unittest.TestCase):
                         "GROUP": group,
                         "PACKAGE": "linux-kernel",
                         "GITHUB_OUTPUT": str(output),
+                        "GITHUB_ACTION_PATH": str(ACTIONS / "package-paths"),
                     },
                 )
                 result = output.read_text()
@@ -285,7 +303,10 @@ class TestWorkflowTests(unittest.TestCase):
                     text,
                 )
             else:
-                self.assertIn('architectures: \'["amd64","arm64"]\'', text)
+                self.assertIn(
+                    "architectures: ${{ needs.cache-check.outputs.verify-arches }}",
+                    text,
+                )
                 self.assertIn(
                     "expected-artifacts: ${{ needs.cache-check.outputs.verify-plan }}",
                     text,
@@ -319,6 +340,63 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 75", verify)
         self.assertIn("always() && hashFiles('lintian-report.txt') != ''", verify)
         self.assertEqual(verify.count("continue-on-error: true"), 1)
+
+    def test_package_settings_drive_toolchain_timeouts_and_cache_setup_order(self):
+        """Only requested Go builds install Go; cache hits skip preparation entirely."""
+        recipe = (WORKFLOWS / "build-recipe.yaml").read_text()
+        self.assertIn("steps.cache.outputs.cache-hit != 'true' && matrix.go", recipe)
+        self.assertIn("timeout-minutes: ${{ matrix.timeout_minutes || 150 }}", recipe)
+        for step in ("Patch vyos-build", "Apply package build policy", "Setup golang"):
+            self.assertLess(
+                recipe.index("name: Cache build"), recipe.index("name: " + step)
+            )
+        for name in ("recipe", "standalone"):
+            text = (WORKFLOWS / f"build-{name}.yaml").read_text()
+            self.assertIn(
+                "uses: ./workflow/.github/actions/package-cache-compression", text
+            )
+            self.assertLess(
+                text.index("package-cache-compression"), text.index("name: Cache build")
+            )
+            self.assertIn("max-parallel: ${{ inputs.max-parallel }}", text)
+        standalone = (WORKFLOWS / "build-standalone.yaml").read_text()
+        self.assertEqual(standalone.count("sudo apt-get update"), 1)
+        self.assertIn(
+            "timeout-minutes: ${{ matrix.timeout_minutes || 30 }}", standalone
+        )
+
+    def test_gzip_shim_is_shared_once_per_runner(self):
+        """Eight restore slots and fresh builds reuse one gzip cache shim."""
+        text = (ACTIONS / "package-cache-compression/action.yaml").read_text()
+        script = textwrap.dedent(text.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "path"
+            env = {**os.environ, "RUNNER_TEMP": str(root), "GITHUB_PATH": str(output)}
+            for _ in range(2):
+                subprocess.run(["bash", "-eu", "-c", script], env=env, check=True)
+            shim = root / "package-cache-gzip"
+            self.assertEqual(output.read_text(), str(shim) + "\n")
+            self.assertEqual(
+                subprocess.run([str(shim / "zstd")], check=False).returncode, 1
+            )
+
+    def test_planned_verification_outputs_are_declared(self):
+        """Both callers expose every planner output consumed by Verify."""
+        for name, job in (("test", "setup-matrix"), ("publish", "cache-check")):
+            text = job_text((WORKFLOWS / f"{name}.yaml").read_text(), job)
+            for output in ("verify-arches", "verify-plan"):
+                self.assertIn(f"{output}: ${{{{ steps.plan.outputs.{output} }}}}", text)
+
+    def test_fast_tool_checks_require_no_build_container_or_secrets(self):
+        """PR checks exercise Debian fixtures without compiling upstream packages."""
+        text = (WORKFLOWS / "check.yaml").read_text()
+        self.assertIn("pull_request:", text)
+        self.assertIn("cancel-in-progress: true", text)
+        self.assertIn("python3 -m unittest discover -s scripts -v", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertNotIn("container:", text)
+        self.assertNotIn("secrets.", text)
 
     def test_publish_jobs_are_repository_gated(self):
         """Every publish job refuses to run outside the canonical repository."""

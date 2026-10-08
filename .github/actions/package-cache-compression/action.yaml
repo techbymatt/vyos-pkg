@@ -1,0 +1,17 @@
+---
+name: Use compatible package cache compression
+description: Keep fresh and legacy package caches on the same gzip cache version, once per runner.
+runs:
+  using: composite
+  steps:
+    - name: Shadow zstd for gzip-compatible package caches
+      shell: bash
+      run: |
+        set -euo pipefail
+        shim="$RUNNER_TEMP/package-cache-gzip"
+        if [[ ! -f "$shim/zstd" ]]; then
+          mkdir -p "$shim"
+          printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
+          chmod +x "$shim/zstd"
+          echo "$shim" >>"$GITHUB_PATH"
+        fi

@@ -7,6 +7,26 @@ Independent package repository for VyOS builds.
 > It is **not affiliated with, endorsed by, or sponsored by VyOS Networks Corporation** by any means.
 > VyOS® is a registered trademark of VyOS Networks Corporation.
 
+## Development at a glance
+
+Package membership and execution settings live in **`scripts/package_catalog.json`**, not in workflow matrices. Standard additions do not require editing workflow YAML.
+
+```sh
+# Inspect the validated catalog, architectures and effective build settings.
+python3 scripts/package_catalog.py validate
+
+# Scaffold a standalone source with extra Debian prerequisites.
+python3 scripts/package_catalog.py add --group build-extra --name my-package \
+  --dep libexample-dev --dep pkg-config
+
+# Scaffold a Go-based VyOS recipe that already exists in the patched vyos-build.
+python3 scripts/package_catalog.py add --group build --name my-recipe --go
+```
+
+The add command validates the whole catalog before replacing the file, rejects duplicate/unsafe entries, and leaves existing entries intact. It does not create upstream recipes, infer binary architectures, or update the pinned membership tests. Complete the [package-addition checklist](#adding-packages) before publishing.
+
+See [the architecture and extension guide](doc/architecture.md) for module responsibilities, CI contracts, and where to add custom adaptations.
+
 ## Publishing
 
 The scheduled publish workflow compares its recorded inputs with `input-manifest.json` in the deployed Pages site. The manifest records this repository's revision (including workflow/site configuration), the patch repository revision (including its pinned submodules), the resolved build-image digest, each package/architecture's source fingerprint and resolved external revisions, its dependency list, and a hash of the public signing-key file. Matching inputs skip builds, cache restoration, verification, and publication. A missing, unreadable, or invalid published manifest causes the workflow to proceed normally.
@@ -22,6 +42,8 @@ Package caches are **source-specific**, keyed by build group, source package, ar
 
 The planner resolves branches, tags (including annotated tags), and abbreviated commits to full commits. Recipe builds use those exact planned revisions, even if a moving ref advances before compilation. Original ref labels are retained for package-version metadata. Changes to unrelated recipes, shared builders, build images, local workflows/helpers, or catalog prerequisites do not invalidate a package's source cache. A new or evicted source cache requires a build; `force_rebuild` remains an explicit override. CI logs report each source's build/restore decision.
 
+Recipe discovery is memoized and remains serial; revision lookups run across up to eight independent repository URLs concurrently. Refs from one URL share the same remote snapshot. Cache keys are indexed once instead of repeatedly scanned for every producer. Unchanged publications and forced rebuilds skip cache-list API requests entirely.
+
 Kernel source pinning also adapts its nested VPP builder and prevents Intel driver cleanup from resetting a planned tag checkout to `origin/main`. Adding these previously untracked VPP inputs changes only kernel fingerprints and requires one initial kernel build; other matching source caches remain reusable.
 
 Existing namespaced caches are migrated conservatively by `scripts/legacy_package_cache.py`. It verifies the producer's inputs, historical patched recipe and scoped configuration, and recorded source checkouts before reuse. Verified archives are restored, checked, and saved under their source-specific key. Sources whose old checkouts cannot be proven (for example, moving branches whose commits were never logged) need an initial build. Schema-v1 producer manifests remain readable; new publications use schema v2 with complete source descriptors. Metadata-service outages fail planning instead of scheduling mass rebuilds.
@@ -30,9 +52,11 @@ Cache visibility is separate from cache existence: workflows can restore their o
 
 Live APT repositories and downloaded toolchains are not locked by source fingerprints. To refresh those inputs, or deliberately apply local build-policy/tooling changes to unchanged sources, run **Repository** manually with **force_rebuild** enabled. This bypasses all package caches and republishes after verification; later runs reuse the refreshed caches. Also use this option after rotating signing credentials, and update the checked-in public key when changing signing identity. Moving recipe Git refs are detected automatically.
 
-Cache hits are restored in batches of up to eight packages per runner. Publication is gated on static validation of every built and restored `.deb`: required control metadata, target architecture (or `all`), readable control and payload archives, and payload checksums when `md5sums` is supplied. Archive members are read without extracting files or following symlinks on the host. Different bytes for the same package/version/architecture are rejected; identical duplicates are permitted. These checks detect structural corruption and internal inconsistencies, not authenticity or runtime correctness.
+Cache hits are restored in batches of up to eight packages per runner. Restore matrices contain only source/group/architecture/cache-key data, not full source descriptors. The shared compression action keeps fresh and migrated archives on the same gzip-compatible cache version; cache path order and metadata scope are preserved.
 
-Lintian runs without installing the built packages. Its output is advisory only and is saved in a `lintian-report` artifact. Both architectures are checked on a single runner without a privileged build container. Installation and maintainer-script testing belong to the separate VyOS image-build repository; publication verification does not execute package scripts or resolve dependencies.
+Publication is gated on static validation of every built and restored `.deb`: required control metadata, target architecture (or `all`), readable control and payload archives, and payload checksums when `md5sums` is supplied. Verification checks the exact planned producer directories and architectures, including cache evictions. Up to four packages are validated concurrently; required control fields use one `dpkg-deb` invocation instead of five, while cross-producer identity checks stay deterministic. Archive members are read without extracting files or following symlinks on the host. Different bytes for the same package/version/architecture are rejected; identical duplicates are permitted. These checks detect structural corruption and internal inconsistencies, not authenticity or runtime correctness.
+
+Lintian runs without installing the built packages. Its output is advisory only and is saved in a `lintian-report` artifact. Larger archives start first to avoid an expensive tail, but report sections retain input order. Both architectures are checked on a single runner without a privileged build container. Installation and maintainer-script testing belong to the separate VyOS image-build repository; publication verification does not execute package scripts or resolve dependencies.
 
 ### Architecture-independent packages
 
@@ -63,6 +87,18 @@ For a standalone repository, ensure it has working Debian packaging and a `rolli
 
 Keep required build dependencies declared in the source's Debian packaging too. The catalog installs prerequisites; it does not replace `debian/control`.
 
+Optional execution settings belong in the same entry:
+
+| Field             | Default                           | Purpose                                                        |
+| ----------------- | --------------------------------- | -------------------------------------------------------------- |
+| `go`              | `false` for catalogued recipes     | Set `true` when a recipe needs the workflow's Go toolchain. Recipe-only. |
+| `timeout_minutes` | `150` for recipes, `30` standalone | Override the native build job timeout, from 1 to 360 minutes.    |
+| `priority`        | `0`                               | Publish queues higher values first (0–100); equal values retain catalog order. |
+
+For example, `{"name": "my-recipe", "go": true, "timeout_minutes": 90, "priority": 10}` installs Go only for that source. The audited catalog currently needs Go in 14 of its 81 recipe/architecture jobs; other recipe jobs skip setup-go. Kernel and Podman builds receive higher scheduling priority. Test preserves the requested source order and uses the same toolchain/timeouts. Uncatalogued Test recipes retain the previous Go-enabled environment until their settings are audited.
+
+These settings are local build policy, not source-cache inputs. Changing them does not automatically recompile matching cached packages; use `force_rebuild` when the change needs to affect their binaries.
+
 ### 2. Classify all binary outputs
 
 Inspect `debian/control`, generated control files, and any nested packaging scripts. Classify the entire source recipe, including documentation, Python modules, and other secondary packages:
@@ -82,18 +118,20 @@ Standard recipes using the shared builder's default command, and standalone repo
 
 If the recipe overrides `build_cmd`, calls another packaging script, or uses another packaging tool, review that path explicitly. If it can produce independent packages:
 
-- Add a checked, recipe-specific adaptation to `scripts/prepare_package_build.py`.
+- Register an audited `BinaryCommand` in `scripts/prepare_package_build.py` for a simple overridden Debian command. Use its `count` field for repeated commands or `path` for a nested build script. Register a recipe/standalone hook for more complex packaging tools or rules repairs.
 - Select `--build=binary` on amd64 and `--build=any` on arm64 for binary-only Debian builds. Preserve source output where needed, as the shared builder does with `full` and `source,any`.
 - Skip independent-only sub-builds on arm64 before they execute. Do not build duplicate packages and then delete them before upload.
 - Preserve architecture-specific build steps and dependencies between sub-builds.
 
 Use the existing net-snmp, FRR/libyang, and strongSwan adaptations as examples. Standalone builds call the same helper with `--group build-extra --root packages`; its `prepare_extra` function repairs package-specific Debian rules before building. For example, vyatta-biosdevname's legacy rules put its architecture-specific packaging commands under `binary-indep`, so the adaptation moves them to `binary-arch` and adds the missing build targets. Exact replacements intentionally fail if the expected upstream layout changes; review and update the adaptation when upgrading that recipe.
 
+Build-mode and pinning edits are staged through `scripts/checked_edits.py`. All command anchors, including nested builders, are validated before files change, so upstream drift cannot leave a partially adapted builder. Executable bits and shared-builder symlinks are preserved. Optional upstream tests enumerate registered build adaptations automatically.
+
 Audit source discovery as well as compilation. Repositories declared with `scm_url`/`commit_id` in `package.toml` are tracked automatically. If a custom builder or nested hook clones another repository, add audited discovery and pinning support in `scripts/package_sources.py`; Kea's packaging clone is an example. Add any out-of-folder source/configuration inputs only to the consuming recipe's descriptor. Source pinning also uses checked replacements and fails on upstream command drift.
 
 ### 4. Validate and enable publication
 
-1. Add focused tests for new classifications, custom adaptations, and source tracking in `scripts/test_package_catalog.py`, `scripts/test_package_build_policy.py`, `scripts/test_prepare_package_build.py`, and `scripts/test_package_sources.py` as appropriate. Include new adapted recipes in the optional upstream-checkout checks.
+1. Pin new membership/dependencies in `scripts/test_package_catalog.py`. Add focused tests for classifications, execution settings, custom adaptations, and source tracking in the relevant `scripts/test_*.py` modules. Recipe preparation registries automatically feed the optional adaptation checks; source-pinning checks cover every catalogued recipe.
 2. Run the [local checks](#local-checks). To check adaptations against actual recipes, set `VYOS_BUILD_ROOT` to a VyOS checkout's `scripts/package-build` directory after applying the downstream patches.
 3. Run the **Test** workflow from the branch containing your changes:
    - For a VyOS recipe, set `package` to its source recipe name.
@@ -106,21 +144,26 @@ The Test workflow accepts package names directly, including sources not yet in t
 
 ## Workflow structure
 
-- `scripts/plan_builds.py` handles input parsing, catalog expansion, cache selection, restore batching, and publication planning. It emits job outputs directly; there is no intermediate TSV or jq matrix filter.
-- `scripts/package_sources.py` discovers scoped source inputs, fingerprints patched recipes, resolves Git refs, and pins recipe checkouts. `scripts/legacy_package_cache.py` proves old cache inputs during migration.
-- `build-recipe.yaml` and `build-standalone.yaml` own execution for both Publish and Test. Publish supplies pinned revisions and enables caching; Test disables caching.
-- The `package-paths` and `package-artifacts` actions share cache/upload paths and output checks with `restore-package`.
-- `verify-packages.yaml` validates unmerged artifacts together, using the expected architecture set. Lintian produces one advisory report for the run.
-- `scripts/build_repo.sh` assembles and signs `rolling/main` after Jekyll. Missing binary inputs and index-generation/signing failures stop publication. Its fixture tests use disposable directories and fake signing tools.
+- `scripts/package_catalog.py` validates definitions and exposes immutable runtime source settings. Its CLI safely scaffolds entries and shows their effective configuration.
+- `scripts/build_matrix.py` owns input normalization, catalog expansion, priority scheduling, cache routing, restore batching, and verification plans. `scripts/plan_builds.py` handles Git/GitHub/Pages boundaries and emits job outputs directly; there is no intermediate TSV or jq matrix filter.
+- `scripts/source_identity.py` owns canonical source descriptors and fingerprints. `scripts/package_sources.py` discovers scoped inputs, resolves Git refs, and pins checkouts. `scripts/legacy_package_cache.py` proves old cache inputs during migration; `scripts/package_cache.py` indexes visible source keys.
+- `build-recipe.yaml` and `build-standalone.yaml` own execution for both Publish and Test. Publish supplies pinned revisions and enables caching; Test disables caching. Cache hits skip patching, preparation, toolchain setup, and compilation. Both callers select concurrency explicitly.
+- The `package-paths` and `package-artifacts` actions share `scripts/package_layout.py`'s ordered cache/upload paths with `restore-package`. The compression action is shared too, and restore cleanup removes only validated output files, never source directories or external symlink targets.
+- `verify-packages.yaml` validates unmerged artifacts together, using the planned producer/architecture sets. Lintian produces one advisory report for the run; incomplete scans fail verification.
+- `scripts/build_repo.sh` assembles and signs `rolling/main` after Jekyll. Its four disjoint indexes scan/compress concurrently; hashing and signing wait for every worker to succeed. Missing binary inputs and index-generation/signing failures stop publication. Fixture tests use disposable directories and fake signing tools.
+- `check.yaml` runs catalog validation and the standard-library test suite on relevant pull requests/pushes. It cancels obsolete check runs and exercises real Debian build-mode/validation fixtures without build images, App credentials, or upstream compilation.
 
 ## Local checks
 
 Run the local checks with:
 
 ```sh
+python3 scripts/package_catalog.py validate
 python3 -m unittest discover -s scripts -v
 pre-commit run --all-files
 actionlint .github/workflows/*.yaml
 ```
 
 The Python tools and tests use Python 3.11+ and the standard library. Source fixtures also need Git. Repository-assembly fixture tests additionally use Bash, GNU checksum tools, gzip, and bzip2. Static validation requires `dpkg` and `dpkg-deb`; the verification runners provide these tools. On Debian hosts with `dpkg-dev` and `make`, the tests also build small source packages to check the actual binary build modes. Set `VYOS_BUILD_ROOT` to a patched VyOS checkout's `scripts/package-build` directory to test build-mode adaptations and source pinning against that checkout; the tests operate on temporary copies without compiling upstream packages.
+
+Do not use `scripts/build_repo.sh` as a local smoke test: it moves package inputs and signs the repository. Run `python3 -m unittest scripts.test_build_repo -v` instead. The known actionlint warning for `ubuntu-26.04` and the two baseline Ruff `TRY004` findings are documented in `AGENTS.md`.

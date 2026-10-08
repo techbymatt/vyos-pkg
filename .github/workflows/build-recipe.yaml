@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.matrix) }}
       max-parallel: ${{ inputs.max-parallel }}
-    timeout-minutes: 150
+    timeout-minutes: ${{ matrix.timeout_minutes || 150 }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -63,37 +63,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: workflow
+          persist-credentials: false
           sparse-checkout: |
             scripts
             .github/actions
-      - name: Patch vyos-build
-        run: |
-          cp --verbose ../patches/vyos-build/*.patch .
-          git apply --3way --verbose ./*.patch
-        working-directory: vyos-build
-      - name: Apply package build policy
-        run: |
-          python3 workflow/scripts/prepare_package_build.py \
-            --root vyos-build/scripts/package-build \
-            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
-      - name: Setup golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.1"
-          cache: false
-      - if: ${{ matrix.arch == 'amd64' && matrix.package == 'shim-signed' }}
-        name: Prefer VyOS shim dependencies
-        run: |
-          printf '%s\n' \
-            'Package: shim-unsigned shim-helpers-amd64-signed shim-helpers-amd64-signed-template' \
-            'Pin: origin "packages.vyos.net"' \
-            'Pin-Priority: 1001' \
-            | sudo tee /etc/apt/preferences.d/vyos-shim >/dev/null
       - id: paths
         uses: ./workflow/.github/actions/package-paths
         with:
           group: build
           package: ${{ matrix.package }}
+      - name: Use compatible package caches
+        if: ${{ inputs.cache }}
+        uses: ./workflow/.github/actions/package-cache-compression
       - id: cache
         name: Cache build
         if: ${{ inputs.cache }}
@@ -101,6 +82,32 @@ jobs:
         with:
           key: ${{ matrix.cache_key }}
           path: ${{ steps.paths.outputs.cache }}
+      - name: Patch vyos-build
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          cp --verbose ../patches/vyos-build/*.patch .
+          git apply --3way --verbose ./*.patch
+        working-directory: vyos-build
+      - name: Apply package build policy
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 workflow/scripts/prepare_package_build.py \
+            --root vyos-build/scripts/package-build \
+            --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
+      - name: Setup golang
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.go }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: false
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.arch == 'amd64' && matrix.package == 'shim-signed' }}
+        name: Prefer VyOS shim dependencies
+        run: |
+          printf '%s\n' \
+            'Package: shim-unsigned shim-helpers-amd64-signed shim-helpers-amd64-signed-template' \
+            'Pin: origin "packages.vyos.net"' \
+            'Pin-Priority: 1001' \
+            | sudo tee /etc/apt/preferences.d/vyos-shim >/dev/null
       - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.source != null }}
         name: Pin recipe source revisions
         env:
