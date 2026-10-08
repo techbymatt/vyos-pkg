@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,173 +26,43 @@ try:
     from . import (
         publish_manifest as manifest,
     )
+    from .build_matrix import (
+        RESTORE_BATCH_SIZE,
+        parse_input,
+        plan_publish,
+        plan_test,
+        runner_label,
+        source_records,
+    )
+    from .package_cache import cache_prefix, visible_cache_keys
+    from .workflow_utils import atomic_write, command_output, output_lines
 except ImportError:
     import legacy_package_cache
     import package_catalog as catalog
     import package_sources
     import publish_manifest as manifest
-
-RESTORE_BATCH_SIZE = 8
-
-
-def runner_label(arch: str) -> str:
-    """GitHub Actions runner label for a package architecture."""
-    return "ubuntu-26.04" if arch == "amd64" else "ubuntu-26.04-arm"
-
-
-def parse_input(raw: str, *, dependency: bool = False) -> list[str]:
-    """Normalize raw comma/whitespace inputs and preserve first occurrence order."""
-    return list(
-        dict.fromkeys(
-            catalog.validate_name(token, dependency=dependency)
-            for token in re.split(r"[,\s]+", raw.strip())
-            if token
-        )
+    from build_matrix import (
+        RESTORE_BATCH_SIZE,
+        parse_input,
+        plan_publish,
+        plan_test,
+        runner_label,
+        source_records,
     )
+    from package_cache import cache_prefix, visible_cache_keys
+    from workflow_utils import atomic_write, command_output, output_lines
 
-
-def plan_test(
-    packages: str, extra_packages: str, deps: str, sources: dict | None = None
-) -> dict:
-    """Build the Test job matrices and verification architectures from inputs."""
-    sources = catalog.load_catalog() if sources is None else sources
-    dependencies = " ".join(parse_input(deps, dependency=True))
-    selected = {
-        "build": parse_input(packages),
-        "build-extra": parse_input(extra_packages),
-    }
-    if set(selected["build"]) & set(selected["build-extra"]):
-        raise ValueError("a Test source cannot appear in both build groups")
-    result = {}
-    arches = set()
-    for group, names in selected.items():
-        entries = []
-        for name in names:
-            for arch in catalog.architectures(group, name, sources):
-                entry = {
-                    "package": name,
-                    "arch": arch,
-                    "runner_label": runner_label(arch),
-                }
-                if group == "build-extra":
-                    entry["deps"] = dependencies
-                entries.append(entry)
-                arches.add(arch)
-        result[group + "-matrix"] = {"include": entries}
-    result["verify-arches"] = sorted(arches)
-    result["verify-plan"] = sorted(
-        f"deb-{entry['package']}-{entry['arch']}"
-        for group in ("build", "build-extra")
-        for entry in result[group + "-matrix"]["include"]
-    )
-    return result
-
-
-def source_records(sources: dict, revisions: dict[tuple[str, str], dict]) -> list[dict]:
-    """Expand resolved source fingerprints into per-architecture records."""
-    records = []
-    for group in catalog.GROUPS:
-        for source in sources[group]:
-            name = source["name"]
-            resolved = revisions[group, name]
-            commit = manifest.require_pattern(
-                resolved["commit"], manifest.REVISION, f"{group}/{name} revision"
-            )
-            inputs = package_sources.validate_source(resolved["source"])
-            digest = package_sources.fingerprint(inputs)
-            if resolved["source_digest"] != digest:
-                raise ValueError(
-                    f"{group}/{name} source fingerprint does not match inputs"
-                )
-            for arch in catalog.architectures(group, name, sources):
-                records.append(
-                    {
-                        "group": group,
-                        "package": name,
-                        "arch": arch,
-                        "commit": commit,
-                        "deps": " ".join(source["deps"]),
-                        "source": inputs,
-                        "source_digest": digest,
-                    }
-                )
-    return records
-
-
-def visible_cache_keys(caches: list[dict], ref: str, default_branch: str) -> list[str]:
-    """Newest first across both refs visible to the workflow cache restore."""
-    visible = [c for c in caches if c["ref"] in (ref, f"refs/heads/{default_branch}")]
-    return [
-        c["key"] for c in sorted(visible, key=lambda c: c["created_at"], reverse=True)
-    ]
-
-
-def cache_prefix(record: dict) -> str:
-    """Identify one source/architecture's outputs independently of build tooling."""
-    return package_sources.cache_prefix(record)
-
-
-def plan_publish(
-    records: list[dict],
-    cached_keys: list[str],
-    run: str,
-    *,
-    changed: bool = True,
-    force_rebuild: bool = False,
-    legacy_matches: dict[tuple[str, str, str], str] | None = None,
-) -> dict:
-    """Route records into build and restore matrices, batching cache hits per runner."""
-    result = {
-        name: {"include": []}
-        for name in ("build-matrix", "build-extra-matrix", "restore-matrix")
-    }
-    if not changed and not force_rebuild:
-        result["verify-plan"] = []
-        return result
-    hits: dict[str, list[dict]] = {}
-    for record in records:
-        prefix = cache_prefix(record)
-        key = (
-            None
-            if force_rebuild
-            else next((key for key in cached_keys if key.startswith(prefix)), None)
-        )
-        if key is None and not force_rebuild:
-            key = (legacy_matches or {}).get(manifest.package_identity(record))
-        entry = dict(
-            record,
-            runner_label=runner_label(record["arch"]),
-            cache_key=key or prefix + run,
-        )
-        if key and key.startswith("cache-v2-"):
-            entry["save_cache_key"] = prefix + run
-        if not entry["deps"]:
-            del entry["deps"]
-        if key:
-            hits.setdefault(entry["runner_label"], []).append(entry)
-        else:
-            result[record["group"] + "-matrix"]["include"].append(entry)
-    for runner, entries in sorted(hits.items()):
-        for start in range(0, len(entries), RESTORE_BATCH_SIZE):
-            result["restore-matrix"]["include"].append(
-                {
-                    "runner_label": runner,
-                    "entries": entries[start : start + RESTORE_BATCH_SIZE],
-                }
-            )
-    result["verify-plan"] = sorted(
-        [
-            f"deb-{entry['package']}-{entry['arch']}"
-            for matrix in ("build-matrix", "build-extra-matrix")
-            for entry in result[matrix]["include"]
-        ]
-        + [
-            f"deb-{entry['package']}-{entry['arch']}"
-            for batch in result["restore-matrix"]["include"]
-            for entry in batch["entries"]
-        ]
-    )
-    return result
+__all__ = [
+    "RESTORE_BATCH_SIZE",
+    "cache_prefix",
+    "output_lines",
+    "parse_input",
+    "plan_publish",
+    "plan_test",
+    "runner_label",
+    "source_records",
+    "visible_cache_keys",
+]
 
 
 def publication_changed(
@@ -207,11 +75,6 @@ def publication_changed(
         return manifest.canonical_bytes(current) != manifest.canonical_bytes(published)
     except (ValueError, RecursionError):
         return True
-
-
-def command_output(arguments: list[str], cwd: Path | None = None) -> str:
-    """Run a command and return its stripped stdout."""
-    return subprocess.check_output(arguments, cwd=cwd, text=True).strip()
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -278,6 +141,7 @@ def fetch_published(repository: str, run: str) -> object:
     except (
         OSError,
         subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
         ValueError,
         RecursionError,
     ) as error:
@@ -369,14 +233,21 @@ def run_publish(args: argparse.Namespace) -> dict:
             args.image,
             args.workflow_root / "vyos-pkg.asc",
         )
-        (args.workflow_root / "input-manifest.json").write_bytes(
-            manifest.canonical_bytes(current)
+        atomic_write(
+            args.workflow_root / "input-manifest.json",
+            manifest.canonical_bytes(current),
         )
-        keys, inaccessible = fetch_caches(args.repository, args.ref)
         published = (
             None if args.force_rebuild else fetch_published(args.repository, args.run)
         )
         changed = publication_changed(current, published, args.force_rebuild)
+        # Cache metadata cannot change a no-op or a forced build decision.
+        # Avoid paginated API requests (and legacy lookups) in both cases.
+        keys, inaccessible = (
+            fetch_caches(args.repository, args.ref)
+            if changed and not args.force_rebuild
+            else ([], [])
+        )
         if changed and not args.force_rebuild:
             verifier = legacy_package_cache.LegacyVerifier(
                 args.repository, reader, resolver
@@ -394,6 +265,7 @@ def run_publish(args: argparse.Namespace) -> dict:
             changed=changed,
             force_rebuild=args.force_rebuild,
             legacy_matches=legacy_matches,
+            sources=sources,
         )
     )
     print(
@@ -434,19 +306,6 @@ def run_publish(args: argparse.Namespace) -> dict:
                 file=sys.stderr,
             )
     return result
-
-
-def output_lines(result: dict) -> Iterator[str]:
-    """Encode results as GITHUB_OUTPUT lines, rejecting embedded line breaks."""
-    for name, value in result.items():
-        encoded = (
-            value
-            if isinstance(value, str)
-            else json.dumps(value, separators=(",", ":"))
-        )
-        if "\n" in encoded or "\r" in encoded:
-            raise ValueError(f"output {name!r} would span multiple lines")
-        yield f"{name}={encoded}"
 
 
 def main(argv: list[str] | None = None) -> int:

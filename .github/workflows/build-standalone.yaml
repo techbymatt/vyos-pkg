@@ -16,6 +16,9 @@ on:
       cache:
         default: false
         type: boolean
+      max-parallel:
+        default: 4
+        type: number
 permissions:
   contents: read
   packages: read
@@ -33,8 +36,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.matrix) }}
-      max-parallel: 4
-    timeout-minutes: 30
+      max-parallel: ${{ inputs.max-parallel }}
+    timeout-minutes: ${{ matrix.timeout_minutes || 30 }}
     steps:
       - name: Checkout the package repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,6 +50,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: workflow
+          persist-credentials: false
           sparse-checkout: |
             scripts
             .github/actions
@@ -55,6 +59,9 @@ jobs:
         with:
           group: build-extra
           package: ${{ matrix.package }}
+      - name: Use compatible package caches
+        if: ${{ inputs.cache }}
+        uses: ./workflow/.github/actions/package-cache-compression
       - id: cache
         name: Cache build
         if: ${{ inputs.cache }}
@@ -62,14 +69,16 @@ jobs:
         with:
           key: ${{ matrix.cache_key }}
           path: ${{ steps.paths.outputs.cache }}
-      - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.deps }}
-        name: Install dependencies
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        name: Install build prerequisites
         env:
           DEPS: ${{ matrix.deps }}
         run: |
           sudo apt-get update
-          read -r -a dependencies <<< "$DEPS"
-          sudo apt-get install --yes "${dependencies[@]}"
+          if [[ -n "$DEPS" ]]; then
+            read -r -a dependencies <<< "$DEPS"
+            sudo apt-get --no-install-recommends install --yes "${dependencies[@]}"
+          fi
       - name: Apply standalone package build policy
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: |
@@ -78,12 +87,7 @@ jobs:
             --package "${{ matrix.package }}" --arch "${{ matrix.arch }}"
       - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         name: Build the package
-        env:
-          DEPS: ${{ matrix.deps }}
         run: |
-          if [[ -z "$DEPS" ]]; then
-            sudo apt-get update
-          fi
           build_type=binary
           if [[ '${{ matrix.arch }}' == arm64 ]]; then build_type=any; fi
           dpkg-buildpackage --build="$build_type" --post-clean --unsigned-changes --unsigned-source

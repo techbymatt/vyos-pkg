@@ -30,28 +30,5 @@ runs:
         GROUP: ${{ inputs.group }}
         PACKAGE: ${{ inputs.package }}
       run: |
-        set -euo pipefail
-        [[ "$PACKAGE" =~ ^[a-z0-9][a-z0-9+._-]*$ ]]
-        case "$GROUP" in
-          build)
-            directory="vyos-build/scripts/package-build/$PACKAGE"
-            metadata='vyos-build/scripts/package-build/**'
-            ;;
-          build-extra)
-            directory=packages
-            metadata=packages
-            ;;
-          *) exit 1 ;;
-        esac
-        sources="$(printf '%s\n' "$metadata/*.buildinfo" "$metadata/*.changes" "$metadata/*.dsc" "$metadata/*debian.tar.*" "$metadata/*orig.tar.*")"
-        {
-          echo "directory=$directory"
-          echo "debs=$directory/*.deb"
-          echo 'sources<<PATHS'
-          printf '%s\n' "$sources"
-          echo PATHS
-          echo 'cache<<PATHS'
-          echo "$directory/*.deb"
-          printf '%s\n' "$sources"
-          echo PATHS
-        } >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/../../../scripts/package_layout.py" outputs \
+          --group "$GROUP" --package "$PACKAGE"

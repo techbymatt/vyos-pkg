@@ -1,0 +1,38 @@
+---
+name: Check workflow tools
+on:
+  pull_request:
+    paths:
+      - scripts/**
+      - .github/workflows/**
+      - .github/actions/**
+      - .pre-commit-config.yaml
+  push:
+    branches: [rolling]
+    paths:
+      - scripts/**
+      - .github/workflows/**
+      - .github/actions/**
+      - .pre-commit-config.yaml
+  workflow_dispatch:
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout workflow tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github
+      - name: Validate the package catalog
+        run: python3 scripts/package_catalog.py validate
+      - name: Test orchestration and real Debian build modes
+        run: python3 -m unittest discover -s scripts -v

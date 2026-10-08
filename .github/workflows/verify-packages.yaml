@@ -25,6 +25,7 @@ jobs:
       - name: Checkout verification tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: scripts
       - name: Download the .deb file artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -41,7 +42,7 @@ jobs:
           if [[ -n "$EXPECTED_ARTIFACTS" ]]; then
             arguments+=(--expected-artifacts "$EXPECTED_ARTIFACTS")
           fi
-          python3 scripts/validate_packages.py --artifacts packages --expected-arches "$EXPECTED_ARCHES" "${arguments[@]}"
+          python3 scripts/validate_packages.py --artifacts packages --expected-arches "$EXPECTED_ARCHES" --jobs 4 "${arguments[@]}"
       - name: Install Lintian
         timeout-minutes: 5
         run: |

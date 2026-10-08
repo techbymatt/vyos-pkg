@@ -20,9 +20,11 @@ from pathlib import PurePosixPath
 try:
     from . import package_sources as sources
     from . import publish_manifest as manifest
+    from .package_cache import CacheIndex
 except ImportError:
     import package_sources as sources
     import publish_manifest as manifest
+    from package_cache import CacheIndex
 
 LEGACY_KEY = re.compile(
     r"^cache-v2-(?P<package>[a-z0-9][a-z0-9_+.-]*)-(?P<arch>amd64|arm64)-"
@@ -317,17 +319,18 @@ class LegacyVerifier:
 
     def matches(self, records: list[dict], cached_keys: list[str]) -> dict:
         """Prefer source-key hits; otherwise select the newest proven legacy hit."""
-        legacy = [key for key in cached_keys if LEGACY_KEY.fullmatch(key)]
+        index = CacheIndex(cached_keys)
+        legacy: dict[tuple[str, str], list[str]] = {}
+        for key in cached_keys:
+            parsed = LEGACY_KEY.fullmatch(key)
+            if parsed is not None:
+                legacy.setdefault((parsed["package"], parsed["arch"]), []).append(key)
         result = {}
         for record in records:
-            if any(key.startswith(sources.cache_prefix(record)) for key in cached_keys):
+            if index.source_hit(record):
                 continue
             identity = manifest.package_identity(record)
-            candidates = [
-                key
-                for key in legacy
-                if key.startswith(f"cache-v2-{record['package']}-{record['arch']}-")
-            ]
+            candidates = legacy.get((record["package"], record["arch"]), [])
             for key in candidates:
                 if self.verify(record, key):
                     result[identity] = key

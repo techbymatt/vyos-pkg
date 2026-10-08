@@ -19,6 +19,7 @@ jobs:
       build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
       build-matrix: ${{ steps.plan.outputs.build-matrix }}
       restore-matrix: ${{ steps.plan.outputs.restore-matrix }}
+      verify-arches: ${{ steps.plan.outputs.verify-arches }}
       verify-plan: ${{ steps.plan.outputs.verify-plan }}
     permissions:
       actions: read
@@ -31,6 +32,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: workflow
+          persist-credentials: false
       - id: image
         name: Resolve the build image digest
         run: |
@@ -109,6 +111,7 @@ jobs:
       image: ${{ needs.cache-check.outputs.image }}
       build-ref: rolling
       cache: true
+      max-parallel: 4
   restore-cached:
     if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.restore-matrix || '{"include":[]}').include[0] != null }}
     name: Restore (cache hit)
@@ -122,6 +125,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: workflow
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github/actions
       - name: Restore package 1
         if: ${{ matrix.entries[0] != null }}
         uses: ./workflow/.github/actions/restore-package
@@ -176,10 +183,10 @@ jobs:
       - restore-cached
     uses: ./.github/workflows/verify-packages.yaml
     with:
-      architectures: '["amd64","arm64"]'
+      architectures: ${{ needs.cache-check.outputs.verify-arches }}
       expected-artifacts: ${{ needs.cache-check.outputs.verify-plan }}
   publish:
-    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && needs.verify.result == 'success' }}
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && github.ref == 'refs/heads/rolling' && needs.verify.result == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -194,6 +201,8 @@ jobs:
     steps:
       - name: Checkout the vyos-pkg repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download planned publication inputs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -213,15 +222,15 @@ jobs:
           pattern: build-*
       - name: Install required packages
         run: |
-          sudo apt-get update
-          sudo apt-get --no-install-recommends --yes install \
-            gnupg2 \
-            dpkg-dev
+          if ! command -v gpg >/dev/null || ! command -v dpkg-scanpackages >/dev/null || ! command -v dpkg-scansources >/dev/null; then
+            sudo apt-get update
+            sudo apt-get --no-install-recommends --yes install gnupg2 dpkg-dev
+          fi
       - name: Insert environment variables
         run: |
           {
-            echo GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
-            echo REPO_OWNER="$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f1)"
+            echo "GNUPGHOME=$(mktemp -d "$RUNNER_TEMP/pgpkeys-XXXXXX")"
+            echo "REPO_OWNER=${GITHUB_REPOSITORY%%/*}"
           } >> "$GITHUB_ENV"
       - id: import_gpg
         name: Import GPG key

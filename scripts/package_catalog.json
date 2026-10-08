@@ -1,10 +1,12 @@
 {
   "build": [
     {
-      "name": "amazon-cloudwatch-agent"
+      "name": "amazon-cloudwatch-agent",
+      "go": true
     },
     {
-      "name": "amazon-ssm-agent"
+      "name": "amazon-ssm-agent",
+      "go": true
     },
     {
       "name": "aws-gwlbtun"
@@ -14,7 +16,8 @@
       "architecture": "independent_only"
     },
     {
-      "name": "blackbox_exporter"
+      "name": "blackbox_exporter",
+      "go": true
     },
     {
       "name": "ddclient",
@@ -30,7 +33,8 @@
       "name": "frr"
     },
     {
-      "name": "frr_exporter"
+      "name": "frr_exporter",
+      "go": true
     },
     {
       "name": "hostap"
@@ -60,7 +64,8 @@
       "name": "libpam-radius-auth"
     },
     {
-      "name": "linux-kernel"
+      "name": "linux-kernel",
+      "priority": 100
     },
     {
       "name": "ndppd"
@@ -72,7 +77,8 @@
       "name": "netfilter"
     },
     {
-      "name": "node_exporter"
+      "name": "node_exporter",
+      "go": true
     },
     {
       "name": "openssl"
@@ -87,7 +93,9 @@
       "name": "owamp"
     },
     {
-      "name": "podman"
+      "name": "podman",
+      "go": true,
+      "priority": 50
     },
     {
       "name": "pyhumps",
@@ -110,7 +118,8 @@
       "name": "tacacs"
     },
     {
-      "name": "telegraf"
+      "name": "telegraf",
+      "go": true
     },
     {
       "name": "udp-broadcast-relay"

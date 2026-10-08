@@ -9,13 +9,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Shadow zstd so the cache version matches the gzip archives
-      shell: bash
-      run: |
-        shim="$(mktemp -d)"
-        printf '#!/bin/sh\nexit 1\n' >"$shim/zstd"
-        chmod +x "$shim/zstd"
-        echo "$shim" >>"$GITHUB_PATH"
+    - uses: ./workflow/.github/actions/package-cache-compression
     - id: paths
       uses: ./workflow/.github/actions/package-paths
       with:
@@ -44,17 +38,8 @@ runs:
       if: ${{ always() }}
       shell: bash
       env:
-        CACHE_PATHS: ${{ steps.paths.outputs.cache }}
+        GROUP: ${{ fromJSON(inputs.entry).group }}
+        PACKAGE: ${{ fromJSON(inputs.entry).package }}
       run: |
-        python3 - <<'PY'
-        import glob
-        import os
-        from pathlib import Path
-
-        # Remove files only; source directories can belong to the caller.
-        for pattern in os.environ['CACHE_PATHS'].splitlines():
-            for match in glob.glob(pattern, recursive=True):
-                path = Path(match)
-                if path.is_file() or path.is_symlink():
-                    path.unlink()
-        PY
+        python3 "$GITHUB_ACTION_PATH/../../../scripts/package_layout.py" clean \
+          --group "$GROUP" --package "$PACKAGE"

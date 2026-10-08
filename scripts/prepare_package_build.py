@@ -10,84 +10,114 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from .checked_edits import CheckedEdits, replace_once
+    from .package_catalog import ARCHITECTURES, GROUPS, validate_name
+except ImportError:
+    from checked_edits import CheckedEdits, replace_once
+    from package_catalog import ARCHITECTURES, GROUPS, validate_name
 
-def replace_once(path: Path, old: str, new: str) -> None:
-    """Rewrite the file, failing unless the audited command occurs exactly once."""
-    text = path.read_text()
-    if text.count(old) != 1:
-        raise ValueError(f"{path}: expected exactly one audited command {old!r}")
-    path.write_text(text.replace(old, new))
+__all__ = ["prepare", "prepare_extra", "prepare_udp_packaging", "replace_once"]
+
+
+@dataclass(frozen=True)
+class BinaryCommand:
+    """An audited command and its exact occurrence count within one recipe file."""
+
+    command: str
+    path: str = "package.toml"
+    count: int = 1
+
+
+# A new overridden Debian build usually needs just one entry here, not another
+# branch in preparation or workflow YAML. More complex tools use the hook below.
+BINARY_COMMANDS = {
+    "dropbear": BinaryCommand("dpkg-buildpackage -us -uc -tc -b"),
+    "frr": BinaryCommand(
+        "dpkg-buildpackage -us -uc -tc -b -Ppkg.frr.rtrlib,pkg.frr.lua"
+    ),
+    "hostap": BinaryCommand(
+        "dpkg-buildpackage -us -uc -tc -b -Ppkg.wpa.nogui,noudeb", "build.sh"
+    ),
+    "net-snmp": BinaryCommand("dpkg-buildpackage -us -uc -tc -b || true"),
+    "netfilter": BinaryCommand("dpkg-buildpackage -uc -us -tc -b"),
+    "openssl": BinaryCommand("dpkg-buildpackage -us -uc -tc -b"),
+    "openvpn": BinaryCommand("dpkg-buildpackage -uc -us -tc -b"),
+    "strongswan": BinaryCommand("dpkg-buildpackage -uc -us -tc -b -d"),
+    "tacacs": BinaryCommand("dpkg-buildpackage -us -uc -tc -b", count=3),
+    "udp-broadcast-relay": BinaryCommand("dpkg-buildpackage -uc -us -tc -b -d"),
+    "xen-guest-agent": BinaryCommand("dpkg-buildpackage -b -us -uc"),
+}
 
 
 def prepare(root: Path, package: str, arch: str) -> None:
-    """Apply audited build-mode adaptations to one package recipe and builders."""
+    """Validate all recipe adaptations, then update its files/shared builder."""
+    validate_name(package)
+    if arch not in ARCHITECTURES:
+        raise ValueError(f"invalid build architecture: {arch}")
+    edits = CheckedEdits()
     # The default builder includes source packages; retain that behavior.
     mode = "full" if arch == "amd64" else "source,any"
-    replace_once(
+    edits.replace(
         root / "build.py",
         "dpkg-buildpackage -uc -us -tc -F --source-option",
         f"dpkg-buildpackage -uc -us -tc --build={mode} --source-option",
     )
-    recipe = root / package / "package.toml"
-    if package == "udp-broadcast-relay":
-        prepare_udp_packaging(root / package)
     binary = "binary" if arch == "amd64" else "any"
-    # Only known command fragments in explicitly audited recipes are changed.
-    commands = {
-        "dropbear": ["dpkg-buildpackage -us -uc -tc -b"],
-        "frr": ["dpkg-buildpackage -us -uc -tc -b -Ppkg.frr.rtrlib,pkg.frr.lua"],
-        "net-snmp": ["dpkg-buildpackage -us -uc -tc -b || true"],
-        "netfilter": ["dpkg-buildpackage -uc -us -tc -b"],
-        "openssl": ["dpkg-buildpackage -us -uc -tc -b"],
-        "openvpn": ["dpkg-buildpackage -uc -us -tc -b"],
-        "strongswan": ["dpkg-buildpackage -uc -us -tc -b -d"],
-        "tacacs": [],
-        "udp-broadcast-relay": ["dpkg-buildpackage -uc -us -tc -b -d"],
-        "xen-guest-agent": ["dpkg-buildpackage -b -us -uc"],
-    }
-    for command in commands.get(package, []):
-        replacement = command.replace(" -b", f" --build={binary}")
-        replace_once(recipe, command, replacement)
-    if package == "tacacs":
-        # Three separate sources in a dependency chain, all using this command.
-        text = recipe.read_text()
-        command = "dpkg-buildpackage -us -uc -tc -b"
-        if text.count(command) != 3:
-            raise ValueError(
-                "tacacs: expected three audited dpkg-buildpackage commands"
-            )
-        recipe.write_text(
-            text.replace(command, f"dpkg-buildpackage -us -uc -tc --build={binary}")
+    specification = BINARY_COMMANDS.get(package)
+    if specification is not None:
+        edits.replace(
+            root / package / specification.path,
+            specification.command,
+            specification.command.replace(" -b", f" --build={binary}"),
+            count=specification.count,
         )
-    if package == "hostap":
-        replace_once(
-            root / package / "build.sh",
-            "dpkg-buildpackage -us -uc -tc -b -Ppkg.wpa.nogui,noudeb",
-            f"dpkg-buildpackage -us -uc -tc --build={binary} -Ppkg.wpa.nogui,noudeb",
-        )
-    if package == "strongswan" and arch == "arm64":
-        replace_once(
-            recipe, "cd ..; ./build-vici.sh", ": # python3-vici is built by amd64 only"
-        )
-    if package == "frr":
-        # apkg has no binary build-type option. Retain its dependency installation
-        # and source-template rendering, then build the rendered source explicitly.
-        replace_once(
-            recipe,
-            "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} +",
-            "pipx run apkg build-dep && "
-            "pipx run apkg srcpkg --result-dir apkg-source && "
-            "dpkg-source -x apkg-source/*.dsc ../libyang-build && "
-            f"(cd ../libyang-build && dpkg-buildpackage --build={binary} -us -uc -tc)",
+    hook = RECIPE_HOOKS.get(package)
+    if hook is not None:
+        hook(root / package, edits, arch, binary)
+    edits.commit()
+
+
+def prepare_frr(directory: Path, edits: CheckedEdits, arch: str, binary: str) -> None:
+    """Render apkg's libyang source, then build it with the native Debian mode."""
+    edits.replace(
+        directory / "package.toml",
+        "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} +",
+        "pipx run apkg build-dep && "
+        "pipx run apkg srcpkg --result-dir apkg-source && "
+        "dpkg-source -x apkg-source/*.dsc ../libyang-build && "
+        f"(cd ../libyang-build && dpkg-buildpackage --build={binary} -us -uc -tc)",
+    )
+
+
+def prepare_strongswan(
+    directory: Path, edits: CheckedEdits, arch: str, binary: str
+) -> None:
+    """Skip independent-only VICI before execution on arm64."""
+    if arch == "arm64":
+        edits.replace(
+            directory / "package.toml",
+            "cd ..; ./build-vici.sh",
+            ": # python3-vici is built by amd64 only",
         )
 
 
 def prepare_udp_packaging(directory: Path) -> None:
     """Repair the rules in the patch applied later by the recipe's git am loop."""
+    edits = CheckedEdits()
+    stage_udp_packaging(directory, edits, "", "")
+    edits.commit()
+
+
+def stage_udp_packaging(
+    directory: Path, edits: CheckedEdits, arch: str, binary: str
+) -> None:
+    """Stage the audited added-file packaging hunk without touching other hunks."""
     path = directory / "patches/udp-broadcast-relay/0001-Add-Debian-packaging.patch"
-    text = path.read_text()
+    text = edits.read(path)
     # This is an added-file patch, not a checkout of the package source yet.
     if re.findall(r"^\+Package: (.+)$", text, re.MULTILINE) != [
         "udp-broadcast-relay"
@@ -144,19 +174,33 @@ def prepare_udp_packaging(directory: Path) -> None:
         rules = rules.replace(old, new)
     added = "".join("+" + line for line in rules.splitlines(keepends=True))
     hunk = f"{match[1]}@@ -0,0 +1,{len(rules.splitlines())} @@\n{added}"
-    path.write_text(text[: match.start()] + hunk + text[match.end() :])
+    edits.set(path, text[: match.start()] + hunk + text[match.end() :])
+
+
+RECIPE_HOOKS = {
+    "frr": prepare_frr,
+    "strongswan": prepare_strongswan,
+    "udp-broadcast-relay": stage_udp_packaging,
+}
 
 
 def prepare_extra(root: Path, package: str) -> None:
+    """Dispatch standalone adaptations; ordinary Debian sources need no hook."""
+    validate_name(package)
+    hook = EXTRA_HOOKS.get(package)
+    if hook is not None:
+        hook(root / package)
+
+
+def prepare_biosdevname(directory: Path) -> None:
     """Repair the legacy binary target split in the standalone source checkout.
 
     vyatta-biosdevname 7fbb031 declares one Architecture: any package but puts
     dh_builddeb under binary-indep. Keep the packaging commands intact, moving
     their ownership to binary-arch. Validate all anchors before writing anything.
     """
-    if package != "vyatta-biosdevname":
-        return
-    debian = root / package / "debian"
+    package = "vyatta-biosdevname"
+    debian = directory / "debian"
     control = (debian / "control").read_text()
     if re.findall(r"^Package:\s*(\S+)\s*$", control, re.MULTILINE) != [
         package
@@ -201,17 +245,22 @@ def prepare_extra(root: Path, package: str) -> None:
             )
     for old, new in replacements:
         text = text.replace(old, new)
-    path.write_text(text)
+    edits = CheckedEdits()
+    edits.set(path, text)
+    edits.commit()
 
 
-def main() -> int:
+EXTRA_HOOKS = {"vyatta-biosdevname": prepare_biosdevname}
+
+
+def main(argv: list[str] | None = None) -> int:
     """Parse --root, --package, --arch and --group, then apply the adaptations."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--package", required=True)
-    parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
-    parser.add_argument("--group", choices=("build", "build-extra"), default="build")
-    args = parser.parse_args()
+    parser.add_argument("--arch", choices=ARCHITECTURES, required=True)
+    parser.add_argument("--group", choices=GROUPS, default="build")
+    args = parser.parse_args(argv)
     try:
         if args.group == "build-extra":
             prepare_extra(args.root, args.package)

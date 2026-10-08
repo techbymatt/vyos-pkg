@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -30,6 +31,16 @@ if (failure == name or (name == "gpg" and failure in args)
         or (failure == "release-find" and name == "find" and args[0] == "main")):
     print("fixture failure: " + str(failure), file=sys.stderr)
     sys.exit(23)
+if name in ("dpkg-scanpackages", "dpkg-scansources") and os.environ.get("INDEX_BARRIER"):
+    root = Path(os.environ["INDEX_BARRIER"])
+    index = args[args.index("-a") + 1] if name == "dpkg-scanpackages" else "source"
+    (root / index).touch()
+    deadline = time.monotonic() + 5
+    while len(list(root.iterdir())) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if len(list(root.iterdir())) != 4:
+        print("index workers did not overlap", file=sys.stderr)
+        sys.exit(24)
 if name == "gpg":
     if "--list-secret-keys" in args:
         if not os.environ.get("NO_KEYS"):
@@ -91,6 +102,7 @@ class BuildRepoTests(unittest.TestCase):
             "ORIGIN",
             "FAIL_TOOL",
             "NO_KEYS",
+            "INDEX_BARRIER",
         ):
             self.env.pop(variable, None)
         self.env.update(
@@ -228,6 +240,30 @@ class BuildRepoTests(unittest.TestCase):
         self.assertTrue(
             all("FALLBACK" in args for name, args in self.calls() if name == "gpg")
         )
+
+    def test_all_four_indexes_scan_concurrently_before_signing(self):
+        """All native/source scanners meet before any index worker can finish."""
+        barrier = self.root / "index-barrier"
+        barrier.mkdir()
+        result = self.run_build(INDEX_BARRIER=str(barrier))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(path.name for path in barrier.iterdir()),
+            ["all", "amd64", "arm64", "source"],
+        )
+        calls = self.calls()
+        first_sign = next(
+            index
+            for index, (name, args) in enumerate(calls)
+            if name == "gpg" and "--output" in args
+        )
+        scanners = [
+            index
+            for index, (name, _) in enumerate(calls)
+            if name.startswith("dpkg-scan")
+        ]
+        self.assertEqual(len(scanners), 4)
+        self.assertLess(max(scanners), first_sign)
 
     def test_default_signing_key_and_optional_sources(self):
         """Signs with the default key and emits an empty Sources index."""

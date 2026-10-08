@@ -124,6 +124,15 @@ class ReportTests(unittest.TestCase):
         self.assertLess(report.index("START 1/3"), report.index("START 2/3"))
         self.assertLess(report.index("START 2/3"), report.index("START 3/3"))
 
+    def test_larger_archives_start_first_but_report_sections_keep_input_order(self):
+        """Expensive scans do not sit at the back of a short worker queue."""
+        for index, path in enumerate(self.packages):
+            path.write_bytes(b"x" * (index + 1))
+        summary, console, report = self.scan("raise SystemExit(0)", jobs=1)
+        self.assertIn("completed=3", summary)
+        self.assertLess(console.index("START 3/3"), console.index("START 1/3"))
+        self.assertLess(report.index("START 1/3"), report.index("START 3/3"))
+
     def test_jobs_must_be_positive(self):
         """Non-positive or non-numeric --jobs values are rejected."""
         for value in ("0", "-1", "nope"):

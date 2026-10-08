@@ -8,6 +8,7 @@ local orchestration/adaptations, shared builders, and unrelated patches do not.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -23,12 +25,49 @@ import tomllib
 
 try:
     from . import package_catalog as catalog
-    from .prepare_package_build import replace_once
+    from .checked_edits import CheckedEdits
+    from .package_cache import cache_prefix
+    from .source_identity import (
+        REVISION,
+        fingerprint,
+        revision,
+        source_text,
+        validate_repositories,
+        validate_source,
+    )
+    from .workflow_utils import canonical_json as canonical_bytes
+    from .workflow_utils import command_output
 except ImportError:
     import package_catalog as catalog
-    from prepare_package_build import replace_once
+    from checked_edits import CheckedEdits
+    from package_cache import cache_prefix
+    from source_identity import (
+        REVISION,
+        fingerprint,
+        revision,
+        source_text,
+        validate_repositories,
+        validate_source,
+    )
+    from workflow_utils import canonical_json as canonical_bytes
+    from workflow_utils import command_output
 
-REVISION = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+__all__ = [
+    "PIN_ENV",
+    "REVISION",
+    "RecipeReader",
+    "Resolver",
+    "cache_prefix",
+    "canonical_bytes",
+    "checkout_source",
+    "fingerprint",
+    "pin_recipe",
+    "revision",
+    "source_text",
+    "validate_repositories",
+    "validate_source",
+]
+
 SHORT_REVISION = r"[0-9a-fA-F]{7,39}"
 PIN_ENV = "PACKAGE_SOURCE_REVISIONS"
 KEA_CLONE = "git clone --branch ${BRANCH} "
@@ -38,123 +77,7 @@ KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
     cd ${CWD}
 fi"""
 GITLAB_HOSTS = {"salsa.debian.org", "gitlab.com", "gitlab.isc.org"}
-
-
-def revision(value: object) -> str:
-    """Require a full, lowercase Git object ID."""
-    if not isinstance(value, str) or re.fullmatch(REVISION, value) is None:
-        raise ValueError(f"invalid source revision: {value!r}")
-    return value
-
-
-def source_text(value: object, field: str) -> str:
-    """Require nonempty single-line text that cannot be a command-line option."""
-    if (
-        not isinstance(value, str)
-        or not value
-        or value.startswith("-")
-        or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
-    ):
-        raise ValueError(f"invalid source {field}: {value!r}")
-    return value
-
-
-def validate_repositories(value: object) -> list[dict]:
-    """Validate and sort resolved repositories without changing ref labels."""
-    if not isinstance(value, list):
-        raise TypeError("source repositories must be an array")
-    result = []
-    seen = set()
-    for entry in value:
-        if not isinstance(entry, dict) or set(entry) != {
-            "name",
-            "url",
-            "ref",
-            "commit",
-        }:
-            raise ValueError("source repository requires name/url/ref/commit")
-        name = catalog.validate_name(entry["name"])
-        if name in seen:
-            raise ValueError(f"duplicate source repository: {name}")
-        seen.add(name)
-        result.append(
-            {
-                "name": name,
-                "url": source_text(entry["url"], "URL"),
-                "ref": source_text(entry["ref"], "ref"),
-                "commit": revision(entry["commit"]),
-            }
-        )
-    return sorted(result, key=lambda entry: entry["name"])
-
-
-def validate_source(value: object) -> dict:
-    """Validate the canonical per-source descriptor used by caches/manifests."""
-    if not isinstance(value, dict) or set(value) != {
-        "recipe_tree",
-        "inputs",
-        "repositories",
-    }:
-        raise ValueError("source requires recipe_tree/inputs/repositories")
-    tree = value["recipe_tree"]
-    if tree is not None:
-        revision(tree)
-    inputs = value["inputs"]
-    if not isinstance(inputs, dict):
-        raise TypeError("source inputs must be an object")
-    for key, text in inputs.items():
-        if not isinstance(key, str) or re.fullmatch(r"[a-z][a-z0-9_]*", key) is None:
-            raise ValueError("invalid scoped source input name")
-        source_text(text, f"input {key}")
-    repositories = validate_repositories(value["repositories"])
-    if tree is None and (inputs or len(repositories) != 1):
-        raise ValueError(
-            "standalone sources require exactly one repository and no inputs"
-        )
-    return {"recipe_tree": tree, "inputs": dict(inputs), "repositories": repositories}
-
-
-def canonical_bytes(value: object) -> bytes:
-    """Serialize source data with deterministic keys and preserved boundaries."""
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-
-
-def fingerprint(source: dict) -> str:
-    """Hash source identities, never local tooling or a global namespace."""
-    return hashlib.sha256(canonical_bytes(validate_source(source))).hexdigest()
-
-
-def cache_prefix(record: dict) -> str:
-    """Identify one source/architecture without a global build-input namespace."""
-    return (
-        f"cache-v3-{record['group']}-{record['package']}-{record['arch']}-"
-        f"{record['source_digest']}-"
-    )
-
-
-def command_output(
-    arguments: list[str],
-    cwd: Path | None = None,
-    *,
-    env: dict | None = None,
-    input_text: str | None = None,
-    timeout: int = 120,
-    strip: bool = True,
-) -> str:
-    """Run a bounded, noninteractive command and return stripped stdout."""
-    result = subprocess.run(
-        arguments,
-        cwd=cwd,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})},
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=timeout,
-    ).stdout
-    return result.strip() if strip else result
+SOURCE_JOBS = 8
 
 
 def git(root: Path, *arguments: str, **kwargs) -> str:
@@ -213,6 +136,35 @@ class Resolver:
         self.commits[identity] = revision(commit)
         return commit
 
+    def resolve_many(
+        self, repositories: list[dict], *, jobs: int = SOURCE_JOBS
+    ) -> dict[tuple[str, str], str]:
+        """Resolve independent remotes concurrently, serializing refs per URL.
+
+        All requests for one URL share one ls-remote snapshot and metadata clone.
+        Do not parallelize recipes/isolated-index patching or legacy proof state.
+        Results and exceptions are consumed in deterministic URL order.
+        """
+        if jobs < 1:
+            raise ValueError("source lookup jobs must be positive")
+        grouped: dict[str, list[str]] = {}
+        for entry in repositories:
+            url, ref = (
+                source_text(entry["url"], "URL"),
+                source_text(entry["ref"], "ref"),
+            )
+            if ref not in grouped.setdefault(url, []):
+                grouped[url].append(ref)
+
+        def resolve_url(url: str) -> dict[tuple[str, str], str]:
+            return {(url, ref): self.resolve(url, ref) for ref in grouped[url]}
+
+        result = {}
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            for resolved in executor.map(resolve_url, sorted(grouped)):
+                result.update(resolved)
+        return result
+
     def abbreviated_commit(self, url: str, ref: str) -> str:
         """Expand a commit ID through a commit API or metadata-only Git clone."""
         parsed = urlsplit(url)
@@ -250,7 +202,10 @@ class Resolver:
             )["id"]
         else:
             if url not in self.repositories:
-                directory = Path(self.temporary.name) / str(len(self.repositories))
+                # Parallel URL lookups must not race for the same clone directory.
+                directory = (
+                    Path(self.temporary.name) / hashlib.sha256(url.encode()).hexdigest()
+                )
                 command_output(
                     [
                         "git",
@@ -311,6 +266,8 @@ class RecipeReader:
         self.patch_root = patch_root
         self.root = patch_root / "vyos-build"
         self.trees: dict[str, tuple[str, str]] = {}
+        self.recipes: dict[tuple[str, str], dict] = {}
+        self.revisions: dict[tuple[str, str], str] = {}
 
     def patched_tree(self, patch_commit: str) -> tuple[str, str]:
         """Return the pinned upstream commit and downstream-patched tree."""
@@ -356,6 +313,15 @@ class RecipeReader:
     def recipe(self, package: str, patch_commit: str) -> dict:
         """Describe one recipe's patched files, scoped inputs, and Git refs."""
         catalog.validate_name(package)
+        identity = package, patch_commit
+        if identity not in self.recipes:
+            self.recipes[identity] = self.read_recipe(package, patch_commit)
+        # Resolution/legacy proof annotates repository dictionaries with commits.
+        # Never let those annotations mutate the cached discovery snapshot.
+        return copy.deepcopy(self.recipes[identity])
+
+    def read_recipe(self, package: str, patch_commit: str) -> dict:
+        """Read uncached recipe inputs, including explicitly audited nested sources."""
         _, tree = self.patched_tree(patch_commit)
         directory = f"scripts/package-build/{package}"
         recipe_tree = revision(git(self.root, "rev-parse", f"{tree}:{directory}"))
@@ -401,13 +367,18 @@ class RecipeReader:
 
     def legacy_revision(self, package: str, patch_commit: str) -> str:
         """Retain the original path revision for diagnostics and legacy lookups."""
+        catalog.validate_name(package)
+        identity = package, patch_commit
+        if identity in self.revisions:
+            return self.revisions[identity]
         upstream, _ = self.patched_tree(patch_commit)
         paths = [f"scripts/package-build/{package}/"]
         if package == "linux-kernel":
             paths.insert(0, "data/defaults.toml")
-        return revision(
+        self.revisions[identity] = revision(
             git(self.root, "log", "-n", "1", "--format=%H", upstream, "--", *paths)
         )
+        return self.revisions[identity]
 
 
 def recipe_repositories(config: dict) -> list[dict]:
@@ -455,39 +426,52 @@ def kea_repository(script: str) -> dict:
 
 
 def resolve_sources(
-    reader: RecipeReader, resolver: Resolver, sources: dict, patch_commit: str
+    reader: RecipeReader,
+    resolver: Resolver,
+    sources: dict,
+    patch_commit: str,
+    *,
+    jobs: int = SOURCE_JOBS,
 ) -> dict:
-    """Resolve the entire catalog once per source, not once per architecture."""
-    result = {}
-    for group in catalog.GROUPS:
-        for entry in sources[group]:
-            name = entry["name"]
-            if group == "build":
-                source = reader.recipe(name, patch_commit)
-                commit = reader.legacy_revision(name, patch_commit)
-            else:
-                source = {
-                    "recipe_tree": None,
-                    "inputs": {},
-                    "repositories": [
-                        {
-                            "name": name,
-                            "url": f"https://github.com/vyos/{name}.git",
-                            "ref": "rolling",
-                        }
-                    ],
-                }
-                commit = resolver.resolve(source["repositories"][0]["url"], "rolling")
-            for repository in source["repositories"]:
-                repository["commit"] = resolver.resolve(
-                    repository["url"], repository["ref"]
-                )
-            source = validate_source(source)
-            result[group, name] = {
-                "commit": commit,
-                "source": source,
-                "source_digest": fingerprint(source),
+    """Discover sources serially, then resolve independent remotes in parallel."""
+    descriptions = {}
+    for definition in catalog.iter_sources(sources):
+        group, name = definition.group, definition.name
+        if group == "build":
+            source = reader.recipe(name, patch_commit)
+            commit = reader.legacy_revision(name, patch_commit)
+        else:
+            source = {
+                "recipe_tree": None,
+                "inputs": {},
+                "repositories": [
+                    {
+                        "name": name,
+                        "url": f"https://github.com/vyos/{name}.git",
+                        "ref": "rolling",
+                    }
+                ],
             }
+            commit = None
+        descriptions[group, name] = source, commit
+    commits = resolver.resolve_many(
+        [
+            entry
+            for source, _ in descriptions.values()
+            for entry in source["repositories"]
+        ],
+        jobs=jobs,
+    )
+    result = {}
+    for identity, (source, commit) in descriptions.items():
+        for repository in source["repositories"]:
+            repository["commit"] = commits[repository["url"], repository["ref"]]
+        source = validate_source(source)
+        result[identity] = {
+            "commit": commit or source["repositories"][0]["commit"],
+            "source": source,
+            "source_digest": fingerprint(source),
+        }
     return result
 
 
@@ -512,6 +496,15 @@ def checkout_source(directory: Path, url: str, ref: str) -> None:
 
 def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
     """Adapt audited Git checkout commands without rewriting version labels."""
+    edits = CheckedEdits()
+    stage_recipe_pins(root, package, repositories, edits)
+    edits.commit()
+
+
+def stage_recipe_pins(
+    root: Path, package: str, repositories: list[dict], edits: CheckedEdits
+) -> None:
+    """Validate every parent/nested adaptation before changing any builder."""
     repositories = validate_repositories(repositories)
     directory = root / catalog.validate_name(package)
     config = tomllib.loads((directory / "package.toml").read_text())
@@ -535,20 +528,15 @@ def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
     builder = directory / "build.py"
     if package == "linux-kernel":
         command = "run(['git', 'checkout', commit_id], cwd=repo_dir, check=True)"
-        text = builder.read_text()
-        if text.count(command) != 2:
-            raise ValueError(
-                "linux-kernel: expected two audited source checkout commands"
-            )
-        builder.write_text(
-            text.replace(command, "checkout_source(repo_dir, scm_url, commit_id)")
+        edits.replace(
+            builder, command, "checkout_source(repo_dir, scm_url, commit_id)", count=2
         )
         if any(
             entry.get("build_cmd") == "build_intel_nic" for entry in config["packages"]
         ):
             # The declared tag was previously discarded immediately before
             # compilation. Clean the pinned checkout, never a moving branch.
-            replace_once(
+            edits.replace(
                 directory / "build-intel-nic.sh",
                 "\n    git reset --hard origin/main\n",
                 "\n    git reset --hard HEAD\n",
@@ -557,26 +545,29 @@ def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
         if not builder.is_symlink() or os.readlink(builder) != "../build.py":
             raise ValueError(f"{package}: unaudited custom source builder")
         builder = root / "build.py"
-        replace_once(
+        edits.replace(
             builder,
             "run(['git', 'checkout', package['commit_id']], cwd=repo_dir, check=True)",
             "checkout_source(repo_dir, package['scm_url'], package['commit_id'])",
         )
-    replace_once(
+    edits.replace(
         builder,
         "from subprocess import run, CalledProcessError",
         "from subprocess import run, CalledProcessError\nfrom package_sources import checkout_source",
     )
     if nested:
         names = {entry["name"] for entry in nested}
-        pin_recipe(
-            root, "vpp", [entry for entry in repositories if entry["name"] in names]
+        stage_recipe_pins(
+            root,
+            "vpp",
+            [entry for entry in repositories if entry["name"] in names],
+            edits,
         )
     if package == "isc-kea":
         repository = next(
             entry for entry in repositories if entry["name"] == "kea-packaging"
         )
-        replace_once(
+        edits.replace(
             directory / "prebuild.sh",
             KEA_CLONE + repository["url"],
             "python3 -m package_sources checkout --directory kea-packaging --url "

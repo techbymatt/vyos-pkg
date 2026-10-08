@@ -13,6 +13,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+try:
+    from .workflow_utils import positive_int
+except ImportError:
+    from workflow_utils import positive_int
+
 
 def stop_process_group(process: subprocess.Popen, grace: float) -> None:
     """Terminate descendants too, including those that ignore SIGTERM."""
@@ -141,9 +146,18 @@ def scan_packages(
                 next_index += 1
 
         with ThreadPoolExecutor(max_workers=width) as executor:
+
+            def input_size(index: int) -> int:
+                """Start larger archives first, without reordering report sections."""
+                try:
+                    return packages[index].stat().st_size
+                except OSError:
+                    # Let Lintian report unreadable/missing inputs as failures.
+                    return 0
+
             futures = [
-                executor.submit(scan_one, index, package)
-                for index, package in enumerate(packages)
+                executor.submit(scan_one, index, packages[index])
+                for index in sorted(range(len(packages)), key=input_size, reverse=True)
             ]
             for future in as_completed(futures):
                 index, outcome, section = future.result()
@@ -175,14 +189,6 @@ def positive_seconds(value: str) -> float:
     if not 0 < seconds < float("inf"):
         raise argparse.ArgumentTypeError("timeout must be finite and positive")
     return seconds
-
-
-def positive_int(value: str) -> int:
-    """Argparse type rejecting non-positive job counts."""
-    count = int(value)
-    if count < 1:
-        raise argparse.ArgumentTypeError("jobs must be positive")
-    return count
 
 
 def main(argv: list[str] | None = None) -> int:

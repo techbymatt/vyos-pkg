@@ -189,6 +189,8 @@ class PublishPlannerTests(unittest.TestCase):
                     "source_digest": rows[0]["source_digest"],
                     "runner_label": "ubuntu-26.04",
                     "cache_key": cache_key(rows[0], "123-1"),
+                    "timeout_minutes": 150,
+                    "go": False,
                 }
             ],
         )
@@ -743,7 +745,9 @@ class PublishBoundaryTests(unittest.TestCase):
         proof.assert_called_once()
         entry = result["restore-matrix"]["include"][0]["entries"][0]
         self.assertEqual(entry["cache_key"], key)
-        self.assertEqual(entry["save_cache_key"], cache_key(entry, "123-1"))
+        self.assertEqual(
+            entry["save_cache_key"], cache_key(record("linux-kernel"), "123-1")
+        )
 
     def test_forced_and_unchanged_publications_do_not_query_legacy_evidence(
         self,
@@ -759,11 +763,36 @@ class PublishBoundaryTests(unittest.TestCase):
             self.assertTrue(self.run_publish()[0]["changed"])
         proof.assert_not_called()
 
+    def test_forced_and_unchanged_publications_skip_paginated_cache_metadata(
+        self,
+    ) -> None:
+        """Cache API work cannot improve no-op or forced-build decisions."""
+        self.run_publish()
+        self.published = (self.root / "input-manifest.json").read_text()
+        for force in (False, True):
+            self.args.force_rebuild = force
+            self.calls.clear()
+            result, _ = self.run_publish()
+            self.assertEqual(result["changed"], force)
+            self.assertFalse(any("--paginate" in command for command, _ in self.calls))
+
     def test_invalid_deployed_manifest_republishes(self) -> None:
         """Broken or malformed deployed manifests trigger republication."""
         for text in ("{broken", "{}", '{"schema_version":1,"schema_version":1}'):
             self.published = text
             self.assertTrue(self.run_publish()[0]["changed"])
+
+    def test_published_manifest_timeout_is_unavailable_not_a_cache_miss(self) -> None:
+        """An unavailable deployment permits planning; cache metadata still fails closed."""
+        with (
+            patch.object(
+                planner,
+                "command_output",
+                side_effect=subprocess.TimeoutExpired("curl", 120),
+            ),
+            redirect_stderr(io.StringIO()),
+        ):
+            self.assertIsNone(planner.fetch_published("owner/repo", "123-1"))
 
     def test_missing_source_revision_fails_before_cache_planning(self) -> None:
         """Source lookup failures stop publication, not trigger mass cache misses."""
@@ -873,6 +902,7 @@ class PublishBoundaryTests(unittest.TestCase):
                 "build-matrix",
                 "build-extra-matrix",
                 "restore-matrix",
+                "verify-arches",
                 "verify-plan",
             },
         )

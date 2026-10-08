@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
@@ -287,6 +288,20 @@ class RecipeScopeTests(unittest.TestCase):
         self.assertEqual(self.read("linux-kernel"), before["linux-kernel"])
         self.assertEqual(git(self.fixture.upstream, "status", "--porcelain"), "")
 
+    def test_recipe_snapshots_are_memoized_without_leaking_commit_annotations(self):
+        """Resolution may annotate copies, never the current/historical cached recipe."""
+        source = self.reader.recipe("frr", self.fixture.patch_commit)
+        source["repositories"][0]["commit"] = OTHER_COMMIT
+        source["inputs"]["unexpected"] = "value"
+        self.reader.legacy_revision("frr", self.fixture.patch_commit)
+        with patch.object(
+            sources, "git", side_effect=AssertionError("unexpected reread")
+        ):
+            cached = self.reader.recipe("frr", self.fixture.patch_commit)
+            self.reader.legacy_revision("frr", self.fixture.patch_commit)
+        self.assertNotIn("commit", cached["repositories"][0])
+        self.assertEqual(cached["inputs"], {})
+
     def test_cached_patch_tree_matches_real_build_patch_application(self):
         """Isolated index application has exactly the build worktree's semantics."""
         path = "scripts/package-build/frr/package.toml"
@@ -532,6 +547,133 @@ class GitResolutionTests(unittest.TestCase):
             ],
         )
 
+    def test_independent_remotes_resolve_in_parallel_with_one_snapshot_per_url(self):
+        """Three independent URL lookups must meet without duplicating ref requests."""
+        urls = [f"https://example.org/source-{index}.git" for index in range(3)]
+        barrier = threading.Barrier(3)
+
+        def lookup(command):
+            self.assertEqual(command[:3], ["git", "ls-remote", "--"])
+            barrier.wait(timeout=5)
+            return f"{COMMIT}\trefs/heads/rolling\n{OTHER_COMMIT}\trefs/tags/v1"
+
+        requested = [
+            {"url": url, "ref": ref}
+            for url in urls
+            for ref in ("rolling", "v1", "rolling")
+        ]
+        with patch.object(sources, "command_output", side_effect=lookup) as output:
+            resolved = self.resolver.resolve_many(requested, jobs=3)
+        self.assertEqual(output.call_count, 3)
+        self.assertEqual(
+            resolved,
+            {
+                (url, ref): COMMIT if ref == "rolling" else OTHER_COMMIT
+                for url in urls
+                for ref in ("rolling", "v1")
+            },
+        )
+
+    def test_parallel_lookups_respect_the_concurrency_limit(self):
+        """The planner cannot flood metadata services as package membership grows."""
+        lock, ready = threading.Lock(), threading.Event()
+        active = 0
+        maximum = 0
+
+        def lookup(command):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                if active == 2:
+                    ready.set()
+            self.assertTrue(ready.wait(timeout=5))
+            with lock:
+                active -= 1
+            return f"{COMMIT}\trefs/heads/rolling"
+
+        with patch.object(sources, "command_output", side_effect=lookup):
+            resolved = self.resolver.resolve_many(
+                [
+                    {"url": f"https://example.org/{index}.git", "ref": "rolling"}
+                    for index in range(8)
+                ],
+                jobs=2,
+            )
+        self.assertEqual(len(resolved), 8)
+        self.assertEqual(maximum, 2)
+
+    def test_parallel_metadata_clones_have_distinct_directories(self):
+        """Two abbreviated-commit lookups cannot allocate the same temporary clone."""
+        barrier = threading.Barrier(2)
+        directories = []
+
+        def lookup(command, **kwargs):
+            if command[1] == "ls-remote":
+                return ""
+            if command[1] == "clone":
+                directories.append(command[-1])
+                barrier.wait(timeout=5)
+                return ""
+            if command[1] == "rev-parse":
+                return COMMIT
+            raise AssertionError(command)
+
+        with patch.object(sources, "command_output", side_effect=lookup):
+            self.resolver.resolve_many(
+                [
+                    {"url": f"https://example.org/{index}.git", "ref": COMMIT[:8]}
+                    for index in range(2)
+                ],
+                jobs=2,
+            )
+        self.assertEqual(len(set(directories)), 2)
+        self.assertEqual(
+            set(directories),
+            {str(path) for path in self.resolver.repositories.values()},
+        )
+
+    def test_parallel_ref_failure_is_not_treated_as_a_missing_cache(self):
+        """A metadata lookup failure propagates instead of inventing source revisions."""
+        with (
+            patch.object(
+                sources, "command_output", side_effect=ValueError("lookup failed")
+            ),
+            self.assertRaisesRegex(ValueError, "lookup failed"),
+        ):
+            self.resolver.resolve_many([{"url": URL, "ref": "rolling"}], jobs=2)
+        with self.assertRaisesRegex(ValueError, "jobs must be positive"):
+            self.resolver.resolve_many([], jobs=0)
+
+    def test_catalog_discovery_resolves_once_per_source_not_per_architecture(self):
+        """Recipe and standalone descriptors share one bounded bulk resolution phase."""
+        catalog = sources.catalog.validate_catalog(
+            {"build": [{"name": "frr"}], "build-extra": [{"name": "extra"}]}
+        )
+        recipe = descriptor()
+        del recipe["repositories"][0]["commit"]
+        reader = unittest.mock.Mock()
+        reader.recipe.return_value = copy.deepcopy(recipe)
+        reader.legacy_revision.return_value = OTHER_COMMIT
+        resolved = {
+            (URL, "rolling"): COMMIT,
+            ("https://github.com/vyos/extra.git", "rolling"): OTHER_COMMIT,
+        }
+        with patch.object(
+            self.resolver, "resolve_many", return_value=resolved
+        ) as lookup:
+            result = sources.resolve_sources(
+                reader, self.resolver, catalog, COMMIT, jobs=4
+            )
+        reader.recipe.assert_called_once_with("frr", COMMIT)
+        self.assertEqual(len(lookup.call_args.args[0]), 2)
+        self.assertEqual(lookup.call_args.kwargs, {"jobs": 4})
+        self.assertEqual(result["build", "frr"]["commit"], OTHER_COMMIT)
+        self.assertEqual(result["build-extra", "extra"]["commit"], OTHER_COMMIT)
+        self.assertEqual(
+            result["build", "frr"]["source"]["repositories"][0]["commit"], COMMIT
+        )
+
     def test_gitlab_short_commits_use_an_encoded_project_commit_api(self):
         """Public GitLab commit lookup avoids cloning packaging histories."""
         with patch.object(
@@ -765,6 +907,8 @@ class PinRecipeTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "audited command"):
             sources.pin_recipe(self.root, "linux-kernel", repositories)
+        self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
+        self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
     def test_kernel_nested_vpp_build_command_drift_fails_pinning(self):
         """Keep source discovery and execution on the same audited sibling recipe."""
@@ -782,6 +926,10 @@ class PinRecipeTests(unittest.TestCase):
         (self.root / "vpp/build.py").write_text(BUILDER)
         with self.assertRaisesRegex(ValueError, "unaudited custom source builder"):
             sources.pin_recipe(self.root, "linux-kernel", repositories)
+        self.assertEqual(
+            (self.root / "linux-kernel/build.py").read_text(), KERNEL_BUILDER
+        )
+        self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
     def test_kea_nested_clone_is_pinned_and_source_order_is_irrelevant(self):
         """Kea's packaging clone gets the planned revision through the helper."""

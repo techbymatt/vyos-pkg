@@ -61,18 +61,35 @@ compress_index() {
 	fi
 }
 
-generate_indexes() {
-	local arch index
-	for arch in "${ARCHITECTURES[@]}"; do
-		index="dists/rolling/main/binary-${arch}/Packages"
-		mkdir -p "${index%/*}"
-		dpkg-scanpackages -a "$arch" pool/main >"$index" || error "Package scanning failed for $arch"
-		compress_index "$index"
-	done
-	index="dists/rolling/main/source/Sources"
+generate_binary_index() {
+	local arch="$1" index="dists/rolling/main/binary-${1}/Packages"
+	mkdir -p "${index%/*}"
+	dpkg-scanpackages -a "$arch" pool/main >"$index" || error "Package scanning failed for $arch"
+	compress_index "$index"
+}
+
+generate_source_index() {
+	local index="dists/rolling/main/source/Sources"
 	mkdir -p "${index%/*}"
 	dpkg-scansources pool/main >"$index" || error "Source scanning failed"
 	compress_index "$index"
+}
+
+generate_indexes() {
+	local arch pid failed=0
+	local pids=()
+	# The four disjoint indexes can scan/compress concurrently. Wait for every
+	# worker, including after a failure, before hashing or signing any output.
+	for arch in "${ARCHITECTURES[@]}"; do
+		generate_binary_index "$arch" &
+		pids+=("$!")
+	done
+	generate_source_index &
+	pids+=("$!")
+	for pid in "${pids[@]}"; do
+		if ! wait "$pid"; then failed=1; fi
+	done
+	((failed == 0)) || error "Index generation failed"
 }
 
 generate_release() {

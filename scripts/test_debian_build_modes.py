@@ -9,6 +9,7 @@ from pathlib import Path
 try:
     from . import package_build_policy as policy
     from . import prepare_package_build as prepare
+    from . import validate_packages as validation
     from .test_prepare_package_build import (
         LEGACY_BIOSDEVNAME_RULES,
         udp_patch,
@@ -17,6 +18,7 @@ try:
 except ImportError:
     import package_build_policy as policy
     import prepare_package_build as prepare
+    import validate_packages as validation
     from test_prepare_package_build import (
         LEGACY_BIOSDEVNAME_RULES,
         udp_patch,
@@ -65,6 +67,7 @@ class DebianBuildModeTests(unittest.TestCase):
                     [f"udp-broadcast-relay_1.0-1_{native}.deb"],
                 )
                 policy.check_outputs("build", "udp-broadcast-relay", native, root)
+                validation.validate_packages(sorted(root.glob("*.deb")), native, jobs=2)
 
     def test_legacy_arch_package_requires_repaired_binary_target(self) -> None:
         """Legacy arch rules build the binary target only after preparation."""
@@ -118,6 +121,7 @@ class DebianBuildModeTests(unittest.TestCase):
                     [f"vyatta-biosdevname_1.0-1_{native}.deb"],
                 )
                 policy.check_outputs("build-extra", "vyatta-biosdevname", native, root)
+                validation.validate_packages(sorted(root.glob("*.deb")), native, jobs=2)
 
     def test_mixed_source_builds_independent_package_only_in_binary_mode(self) -> None:
         """binary builds arch-all packages too; any builds only native ones."""
@@ -185,8 +189,15 @@ class DebianBuildModeTests(unittest.TestCase):
                 if mode == "binary" and native == "arm64":
                     with self.assertRaisesRegex(ValueError, "Architecture"):
                         policy.check_outputs("build", "sample", native, root)
+                    with self.assertRaisesRegex(ValueError, "produced by amd64 only"):
+                        validation.validate_packages(
+                            sorted(root.glob("*.deb")), native, jobs=2
+                        )
                 else:
                     policy.check_outputs("build", "sample", native, root)
+                    validation.validate_packages(
+                        sorted(root.glob("*.deb")), native, jobs=2
+                    )
 
 
 if __name__ == "__main__":

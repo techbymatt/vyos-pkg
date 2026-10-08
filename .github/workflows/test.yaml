@@ -31,6 +31,7 @@ jobs:
       - name: Checkout build tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: scripts
       - id: plan
         name: Plan requested builds
@@ -69,6 +70,7 @@ jobs:
       image: ghcr.io/techbymatt/vyos-build:rolling
       build-ref: rolling
       cache: false
+      max-parallel: 8
   verify:
     if: ${{ !cancelled() && fromJSON(needs.setup-matrix.outputs.verify-arches || '[]')[0] != null && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && contains(needs.*.result, 'success') }}
     needs:
