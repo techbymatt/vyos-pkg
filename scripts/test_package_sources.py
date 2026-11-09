@@ -51,6 +51,15 @@ INTEL_BUILDER = """#!/bin/sh
 set -e
 cd "ethernet-linux-$1"
 if [ -d .git ]; then
+    git reset --hard HEAD
+    git clean --force -d -x
+fi
+git rev-parse HEAD
+"""
+LEGACY_INTEL_BUILDER = """#!/bin/sh
+set -e
+cd "ethernet-linux-$1"
+if [ -d .git ]; then
     git clean --force -d -x
     git reset --hard origin/main
 fi
@@ -881,6 +890,7 @@ class PinRecipeTests(unittest.TestCase):
         self.assertIn(
             "git reset --hard HEAD", (directory / "build-intel-nic.sh").read_text()
         )
+        self.assertEqual((directory / "build-intel-nic.sh").read_text(), INTEL_BUILDER)
         for name, text in before.items():
             self.assertEqual((self.root / name / "package.toml").read_text(), text)
 
@@ -899,16 +909,43 @@ class PinRecipeTests(unittest.TestCase):
         self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
         self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
-    def test_kernel_driver_reset_command_drift_fails_pinning(self):
-        """A changed reset target requires review instead of bypassing planned SHAs."""
+    def test_kernel_driver_legacy_reset_is_pinned(self):
+        """Older recipes still reset to the planned checkout rather than origin/main."""
         directory, repositories = self.kernel()
-        (directory / "build-intel-nic.sh").write_text(
-            INTEL_BUILDER.replace("origin/main", "origin/master")
+        driver = directory / "build-intel-nic.sh"
+        driver.write_text(LEGACY_INTEL_BUILDER)
+        sources.pin_recipe(self.root, "linux-kernel", repositories)
+        self.assertEqual(
+            driver.read_text(), LEGACY_INTEL_BUILDER.replace("origin/main", "HEAD")
         )
-        with self.assertRaisesRegex(ValueError, "audited command"):
-            sources.pin_recipe(self.root, "linux-kernel", repositories)
-        self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
-        self.assertEqual((self.root / "build.py").read_text(), BUILDER)
+
+    def test_kernel_driver_reset_command_drift_fails_pinning(self):
+        """Missing, changed, or extra resets fail before any builder is rewritten."""
+        directory, repositories = self.kernel()
+        driver = directory / "build-intel-nic.sh"
+        current = "    git reset --hard HEAD\n"
+        legacy = "    git reset --hard origin/main\n"
+        unexpected = "    git reset --hard origin/master\n"
+        for label, reset in (
+            ("changed target", unexpected),
+            ("changed options", "    git reset HEAD\n"),
+            ("missing", ""),
+            ("duplicate HEAD", current * 2),
+            ("duplicate legacy", legacy * 2),
+            ("mixed", current + legacy),
+            ("HEAD and unexpected", current + unexpected),
+            ("legacy and unexpected", legacy + unexpected),
+        ):
+            with self.subTest(reset=label):
+                (directory / "build.py").write_text(KERNEL_BUILDER)
+                (self.root / "build.py").write_text(BUILDER)
+                script = INTEL_BUILDER.replace(current, reset)
+                driver.write_text(script)
+                with self.assertRaisesRegex(ValueError, "audited"):
+                    sources.pin_recipe(self.root, "linux-kernel", repositories)
+                self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
+                self.assertEqual((self.root / "build.py").read_text(), BUILDER)
+                self.assertEqual(driver.read_text(), script)
 
     def test_kernel_nested_vpp_build_command_drift_fails_pinning(self):
         """Keep source discovery and execution on the same audited sibling recipe."""
