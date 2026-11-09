@@ -1,4 +1,5 @@
 ---
+# $schema: https://json.schemastore.org/github-workflow.json
 name: Build recipe packages
 on:
   workflow_call:
@@ -37,6 +38,7 @@ jobs:
     defaults:
       run:
         shell: bash
+    name: Build
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.matrix) }}
