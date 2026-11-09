@@ -534,11 +534,23 @@ def stage_recipe_pins(
         if any(
             entry.get("build_cmd") == "build_intel_nic" for entry in config["packages"]
         ):
-            # The declared tag was previously discarded immediately before
-            # compilation. Clean the pinned checkout, never a moving branch.
+            # Older recipes discard the declared tag before compilation; newer
+            # recipes already reset to HEAD. Require one audited reset in either
+            # form so extra commands cannot move away from the planned checkout.
+            driver = directory / "build-intel-nic.sh"
+            resets = re.findall(
+                r"^[ \t]*git[ \t]+reset\b.*$", edits.read(driver), re.MULTILINE
+            )
+            if resets not in (
+                ["    git reset --hard origin/main"],
+                ["    git reset --hard HEAD"],
+            ):
+                raise ValueError(
+                    f"{driver}: expected exactly one audited Intel driver reset"
+                )
             edits.replace(
-                directory / "build-intel-nic.sh",
-                "\n    git reset --hard origin/main\n",
+                driver,
+                f"\n{resets[0]}\n",
                 "\n    git reset --hard HEAD\n",
             )
     else:
