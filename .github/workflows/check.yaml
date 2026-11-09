@@ -1,5 +1,5 @@
 ---
-# $schema: https://json.schemastore.org/github-workflow.json
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: Check workflow tools
 on:
   pull_request:
