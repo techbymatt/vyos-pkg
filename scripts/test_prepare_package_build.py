@@ -9,15 +9,38 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
-
-import tomllib
 
 try:
     from . import prepare_package_build as prepare
 except ImportError:
     import prepare_package_build as prepare
+
+
+# Command layout from vyos-build 0bb5f2bc, with a separate dependency/split-horizon hook.
+FRR_RECIPE = r"""[[packages]]
+name = "libyang"
+commit_id = "v3.13.6"
+scm_url = "https://github.com/CESNET/libyang.git"
+build_cmd = "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} + && sudo dpkg -i ../libyang*.deb"
+
+[[packages]]
+name = "libbpf"
+commit_id = "debian/1.7.0-1_exp1"
+scm_url = "https://salsa.debian.org/sudip/libbpf.git"
+
+[[packages]]
+name = "frr"
+commit_id = "9d7b378b80fed"
+scm_url = "https://github.com/FRRouting/frr.git"
+pre_build_hook = "sudo dpkg -i ../*.deb && ./enable-splithorizon"
+build_cmd = "dpkg-buildpackage -us -uc -tc -F --source-option=--tar-ignore=.git --source-option=--tar-ignore=.github --source-option=-i --source-option=--extend-diff-ignore='^\\.github(?:/.*)?$' -Ppkg.frr.rtrlib,pkg.frr.lua"
+
+[dependencies]
+packages = ["librtr-dev", "liblua5.3-dev", "libbpf-dev"]
+"""
 
 
 # Minimal legacy rules reproducing the upstream target layout, with real dpkg
@@ -293,19 +316,86 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("./build-vici.sh", path.read_text())
         self.assertIn("--build=any -d", path.read_text())
 
-    def test_libyang_uses_rendered_source_with_explicit_binary_mode(self) -> None:
-        """apkg builds are rewritten to a rendered source with explicit binary mode."""
-        path = self.recipe(
-            "frr",
-            'build_cmd = "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} +"\n'
-            'frr = "dpkg-buildpackage -us -uc -tc -b -Ppkg.frr.rtrlib,pkg.frr.lua"\n',
+    def test_frr_preserves_source_builds_and_libyang_native_modes(self) -> None:
+        """FRR keeps source checks/options; only amd64 builds independent binaries."""
+        path = self.recipe("frr", FRR_RECIPE)
+        builder = self.root / "build.py"
+        original_builder = builder.read_text()
+        for arch, source_mode, binary_mode in (
+            ("amd64", "full", "binary"),
+            ("arm64", "source,any", "any"),
+        ):
+            with self.subTest(arch=arch):
+                path.write_text(FRR_RECIPE)
+                builder.write_text(original_builder)
+                expected = tomllib.loads(FRR_RECIPE)
+                expected["packages"][0]["build_cmd"] = (
+                    "pipx run apkg build-dep && "
+                    "pipx run apkg srcpkg --result-dir apkg-source && "
+                    "dpkg-source -x apkg-source/*.dsc ../libyang-build && "
+                    "(cd ../libyang-build && "
+                    f"dpkg-buildpackage --build={binary_mode} -us -uc -tc) && "
+                    "sudo dpkg -i ../libyang*.deb"
+                )
+                frr = expected["packages"][2]
+                frr["build_cmd"] = frr["build_cmd"].replace(
+                    " -F ", f" --build={source_mode} "
+                )
+                prepare.prepare(self.root, "frr", arch)
+                self.assertEqual(tomllib.loads(path.read_text()), expected)
+                self.assertEqual(
+                    builder.read_text(),
+                    original_builder.replace(" -F ", f" --build={source_mode} "),
+                )
+
+    def test_frr_command_drift_fails_without_partial_edits(self) -> None:
+        """Missing, duplicate, or changed commands leave the recipe/builder intact."""
+        path = self.recipe("frr", FRR_RECIPE)
+        builder = self.root / "build.py"
+        original_builder = builder.read_text()
+        frr_command = next(
+            line
+            for line in FRR_RECIPE.splitlines()
+            if line.startswith('build_cmd = "dpkg-buildpackage')
         )
-        prepare.prepare(self.root, "frr", "arm64")
-        command = tomllib.loads(path.read_text())["build_cmd"]
-        self.assertIn("apkg build-dep && pipx run apkg srcpkg", command)
-        self.assertIn("dpkg-source -x", command)
-        self.assertIn("dpkg-buildpackage --build=any", command)
-        self.assertNotIn("apkg build -i", command)
+        variants = (
+            ("missing FRR command", FRR_RECIPE.replace(frr_command, "")),
+            (
+                "binary-only FRR command",
+                FRR_RECIPE.replace(
+                    frr_command,
+                    'build_cmd = "dpkg-buildpackage -us -uc -tc -b '
+                    '-Ppkg.frr.rtrlib,pkg.frr.lua"',
+                ),
+            ),
+            (
+                "duplicate FRR command",
+                FRR_RECIPE + f'\n[[packages]]\nname = "duplicate"\n{frr_command}\n',
+            ),
+            (
+                "changed source options",
+                FRR_RECIPE.replace("--source-option=--tar-ignore=.github ", ""),
+            ),
+            (
+                "changed build profiles",
+                FRR_RECIPE.replace("pkg.frr.lua", "pkg.frr.other"),
+            ),
+            (
+                "changed libyang command",
+                FRR_RECIPE.replace("pipx run apkg build -i", "pipx run apkg build"),
+            ),
+        )
+        for arch in ("amd64", "arm64"):
+            for label, text in variants:
+                with self.subTest(arch=arch, variant=label):
+                    path.write_text(text)
+                    builder.write_text(original_builder)
+                    with self.assertRaisesRegex(
+                        ValueError, "expected exactly one audited command"
+                    ):
+                        prepare.prepare(self.root, "frr", arch)
+                    self.assertEqual(path.read_text(), text)
+                    self.assertEqual(builder.read_text(), original_builder)
 
     def test_unrecognized_recipe_change_fails(self) -> None:
         """Unrecognized recipe commands fail instead of being edited."""

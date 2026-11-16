@@ -36,9 +36,6 @@ class BinaryCommand:
 # branch in preparation or workflow YAML. More complex tools use the hook below.
 BINARY_COMMANDS = {
     "dropbear": BinaryCommand("dpkg-buildpackage -us -uc -tc -b"),
-    "frr": BinaryCommand(
-        "dpkg-buildpackage -us -uc -tc -b -Ppkg.frr.rtrlib,pkg.frr.lua"
-    ),
     "hostap": BinaryCommand(
         "dpkg-buildpackage -us -uc -tc -b -Ppkg.wpa.nogui,noudeb", "build.sh"
     ),
@@ -82,7 +79,22 @@ def prepare(root: Path, package: str, arch: str) -> None:
 
 
 def prepare_frr(directory: Path, edits: CheckedEdits, arch: str, binary: str) -> None:
-    """Render apkg's libyang source, then build it with the native Debian mode."""
+    """Retain FRR source builds and render libyang with the native binary mode."""
+    # Upstream uses source builds to catch patch failures; keep those checks.
+    mode = "full" if arch == "amd64" else "source,any"
+    command = (
+        "dpkg-buildpackage -us -uc -tc -F "
+        "--source-option=--tar-ignore=.git "
+        "--source-option=--tar-ignore=.github "
+        "--source-option=-i "
+        r"--source-option=--extend-diff-ignore='^\\.github(?:/.*)?$' "
+        "-Ppkg.frr.rtrlib,pkg.frr.lua"
+    )
+    edits.replace(
+        directory / "package.toml",
+        command,
+        command.replace(" -F ", f" --build={mode} "),
+    )
     edits.replace(
         directory / "package.toml",
         "pipx run apkg build -i && find pkg/pkgs -type f -name *.deb -exec mv -t .. {} +",
