@@ -9,16 +9,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
-
-import tomllib
+from unittest.mock import patch
 
 try:
+    from . import git_network
     from . import package_sources as sources
     from . import prepare_package_build as build_policy
 except ImportError:
+    import git_network
     import package_sources as sources
     import prepare_package_build as build_policy
 
@@ -28,6 +29,8 @@ URL = "https://github.com/example/source.git"
 BUILDER = """from subprocess import run, CalledProcessError
 
 def checkout(package, repo_dir):
+    if not repo_dir.exists():
+        run(['git', 'clone', package['scm_url'], str(repo_dir)], check=True)
     run(['git', 'checkout', package['commit_id']], cwd=repo_dir, check=True)
     return package['commit_id'].replace('/', '_')
 """
@@ -532,28 +535,42 @@ class GitResolutionTests(unittest.TestCase):
             ):
                 self.resolver.resolve(self.url, ref)
 
+    def test_retried_ref_lookup_caches_only_the_successful_snapshot(self):
+        """A transient connection failure does not poison lookups for the same URL."""
+        failure = subprocess.CalledProcessError(
+            128,
+            ["git", "ls-remote"],
+            stderr="fatal: Could not resolve host: example.org",
+        )
+        refs = f"{COMMIT}\trefs/heads/rolling\n{OTHER_COMMIT}\trefs/tags/v1"
+        with (
+            patch.object(git_network, "_git", side_effect=[failure, refs]) as remote,
+            patch.object(git_network.time, "sleep") as delay,
+            patch.object(git_network.sys, "stderr"),
+        ):
+            self.assertEqual(self.resolver.resolve(URL, "rolling"), COMMIT)
+            self.assertEqual(self.resolver.resolve(URL, "v1"), OTHER_COMMIT)
+        self.assertEqual(remote.call_count, 2)
+        delay.assert_called_once_with(5)
+
     def test_github_short_commit_resolution_and_memoization(self):
         """GitHub abbreviated commits use its commit API once per ref."""
-        with patch.object(
-            sources, "command_output", side_effect=["", COMMIT]
-        ) as output:
+        with (
+            patch.object(sources, "remote_git", return_value="") as remote,
+            patch.object(sources, "command_output", return_value=COMMIT) as output,
+        ):
             self.assertEqual(self.resolver.resolve(URL, "a" * 8), COMMIT)
             self.assertEqual(self.resolver.resolve(URL, "a" * 8), COMMIT)
             self.assertEqual(self.resolver.resolve(URL, COMMIT), COMMIT)
-        self.assertEqual(
-            output.call_args_list,
+        remote.assert_called_once_with("ls-remote", "--", URL)
+        output.assert_called_once_with(
             [
-                call(["git", "ls-remote", "--", URL]),
-                call(
-                    [
-                        "gh",
-                        "api",
-                        "repos/example/source/commits/aaaaaaaa",
-                        "--jq",
-                        ".sha",
-                    ]
-                ),
-            ],
+                "gh",
+                "api",
+                "repos/example/source/commits/aaaaaaaa",
+                "--jq",
+                ".sha",
+            ]
         )
 
     def test_independent_remotes_resolve_in_parallel_with_one_snapshot_per_url(self):
@@ -561,8 +578,8 @@ class GitResolutionTests(unittest.TestCase):
         urls = [f"https://example.org/source-{index}.git" for index in range(3)]
         barrier = threading.Barrier(3)
 
-        def lookup(command):
-            self.assertEqual(command[:3], ["git", "ls-remote", "--"])
+        def lookup(*arguments):
+            self.assertEqual(arguments[:2], ("ls-remote", "--"))
             barrier.wait(timeout=5)
             return f"{COMMIT}\trefs/heads/rolling\n{OTHER_COMMIT}\trefs/tags/v1"
 
@@ -571,7 +588,7 @@ class GitResolutionTests(unittest.TestCase):
             for url in urls
             for ref in ("rolling", "v1", "rolling")
         ]
-        with patch.object(sources, "command_output", side_effect=lookup) as output:
+        with patch.object(sources, "remote_git", side_effect=lookup) as output:
             resolved = self.resolver.resolve_many(requested, jobs=3)
         self.assertEqual(output.call_count, 3)
         self.assertEqual(
@@ -589,7 +606,7 @@ class GitResolutionTests(unittest.TestCase):
         active = 0
         maximum = 0
 
-        def lookup(command):
+        def lookup(*arguments):
             nonlocal active, maximum
             with lock:
                 active += 1
@@ -601,7 +618,7 @@ class GitResolutionTests(unittest.TestCase):
                 active -= 1
             return f"{COMMIT}\trefs/heads/rolling"
 
-        with patch.object(sources, "command_output", side_effect=lookup):
+        with patch.object(sources, "remote_git", side_effect=lookup):
             resolved = self.resolver.resolve_many(
                 [
                     {"url": f"https://example.org/{index}.git", "ref": "rolling"}
@@ -617,18 +634,17 @@ class GitResolutionTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         directories = []
 
-        def lookup(command, **kwargs):
-            if command[1] == "ls-remote":
-                return ""
-            if command[1] == "clone":
-                directories.append(command[-1])
-                barrier.wait(timeout=5)
-                return ""
-            if command[1] == "rev-parse":
-                return COMMIT
-            raise AssertionError(command)
+        def clone(directory, url, *options, timeout):
+            self.assertEqual(options, ("--bare", "--filter=blob:none"))
+            self.assertEqual(timeout, 300)
+            directories.append(directory)
+            barrier.wait(timeout=5)
 
-        with patch.object(sources, "command_output", side_effect=lookup):
+        with (
+            patch.object(sources, "remote_git", return_value=""),
+            patch.object(sources, "clone_repository", side_effect=clone),
+            patch.object(sources, "git", return_value=COMMIT),
+        ):
             self.resolver.resolve_many(
                 [
                     {"url": f"https://example.org/{index}.git", "ref": COMMIT[:8]}
@@ -637,16 +653,13 @@ class GitResolutionTests(unittest.TestCase):
                 jobs=2,
             )
         self.assertEqual(len(set(directories)), 2)
-        self.assertEqual(
-            set(directories),
-            {str(path) for path in self.resolver.repositories.values()},
-        )
+        self.assertEqual(set(directories), set(self.resolver.repositories.values()))
 
     def test_parallel_ref_failure_is_not_treated_as_a_missing_cache(self):
         """A metadata lookup failure propagates instead of inventing source revisions."""
         with (
             patch.object(
-                sources, "command_output", side_effect=ValueError("lookup failed")
+                sources, "remote_git", side_effect=ValueError("lookup failed")
             ),
             self.assertRaisesRegex(ValueError, "lookup failed"),
         ):
@@ -685,17 +698,16 @@ class GitResolutionTests(unittest.TestCase):
 
     def test_gitlab_short_commits_use_an_encoded_project_commit_api(self):
         """Public GitLab commit lookup avoids cloning packaging histories."""
-        with patch.object(
-            sources, "command_output", side_effect=["", json.dumps({"id": COMMIT})]
-        ) as output:
-            self.assertEqual(
-                self.resolver.resolve(
-                    "https://salsa.debian.org/debian/pkg.git", "a" * 8
-                ),
-                COMMIT,
-            )
-        self.assertEqual(output.call_count, 2)
-        output.assert_called_with(
+        url = "https://salsa.debian.org/debian/pkg.git"
+        with (
+            patch.object(sources, "remote_git", return_value="") as remote,
+            patch.object(
+                sources, "command_output", return_value=json.dumps({"id": COMMIT})
+            ) as output,
+        ):
+            self.assertEqual(self.resolver.resolve(url, "a" * 8), COMMIT)
+        remote.assert_called_once_with("ls-remote", "--", url)
+        output.assert_called_once_with(
             [
                 "curl",
                 "--fail",
@@ -731,7 +743,11 @@ class GitResolutionTests(unittest.TestCase):
     ):
         """Unknown-host abbreviated logs need existing metadata or a full ID."""
         url = "https://git.kernel.org/firmware.git"
-        with patch.object(sources, "command_output") as output:
+        with (
+            patch.object(sources, "command_output") as output,
+            patch.object(sources, "remote_git") as remote,
+            patch.object(sources, "clone_repository") as clone,
+        ):
             with self.assertRaisesRegex(ValueError, "unverifiable abbreviated"):
                 self.resolver.resolve_evidence(url, COMMIT[:8], COMMIT)
             self.assertEqual(
@@ -740,6 +756,8 @@ class GitResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source revision changed"):
                 self.resolver.resolve_evidence(url, COMMIT, OTHER_COMMIT)
         output.assert_not_called()
+        remote.assert_not_called()
+        clone.assert_not_called()
 
     def test_planned_checkout_survives_a_moving_branch(self):
         """Compilation gets the planned SHA even after rolling advances."""
@@ -794,10 +812,15 @@ class GitResolutionTests(unittest.TestCase):
         ]
         sources.pin_recipe(root, "linux-kernel", repositories)
         checkout = directory / "ethernet-linux-igb"
-        git(self.root, "clone", "--quiet", self.url, str(checkout))
         with (
             patch.dict(os.environ, {sources.PIN_ENV: json.dumps(repositories)}),
-            patch.dict(sys.modules, {"package_sources": sources}),
+            patch.dict(
+                sys.modules,
+                {
+                    "package_sources": sources,
+                    "git_network": git_network,
+                },
+            ),
         ):
             modules = []
             for name, path in (
@@ -811,12 +834,15 @@ class GitResolutionTests(unittest.TestCase):
                 spec.loader.exec_module(module)
                 modules.append(module)
             shared, kernel = modules
+            checkout_shared = directory / "checkout-shared"
             self.assertEqual(
                 shared.checkout(
-                    {"scm_url": self.url, "commit_id": "rolling"}, checkout
+                    {"scm_url": self.url, "commit_id": "rolling"}, checkout_shared
                 ),
                 "rolling",
             )
+            self.assertEqual(git(checkout_shared, "rev-parse", "HEAD"), self.first)
+            kernel.checkout(checkout, self.url, "rolling", False)
             self.assertEqual(git(checkout, "rev-parse", "HEAD"), self.first)
             kernel.checkout(checkout, self.url, "rolling", True)
         subprocess.run(
@@ -982,7 +1008,67 @@ class PinRecipeTests(unittest.TestCase):
         script = (directory / "prebuild.sh").read_text()
         self.assertIn("python3 -m package_sources checkout", script)
         self.assertIn('--ref "$BRANCH"', script)
+        self.assertIn("|| exit $?", script)
+        self.assertNotIn("--unplanned", script)
         self.assertNotIn("git clone --branch", script)
+
+    def test_unplanned_kea_uses_the_recipe_ref_and_stops_on_clone_failure(self):
+        """The Test hook keeps its branch and never copies packaging after failure."""
+        directory = self.recipe("isc-kea")
+        config = (directory / "package.toml").read_text()
+        path = directory / "prebuild.sh"
+        path.write_text(
+            '#!/bin/sh\nBRANCH="Kea-3.0.3"\n'
+            + sources.KEA_CLONE
+            + URL
+            + "\ntouch copied\n"
+        )
+        sources.retry_recipe_clones(self.root, "isc-kea")
+        self.assertEqual((directory / "package.toml").read_text(), config)
+        self.assertIn(
+            "run(['git', 'checkout', package['commit_id']]",
+            (self.root / "build.py").read_text(),
+        )
+        self.assertIn('--ref "$BRANCH" --unplanned || exit $?', path.read_text())
+        fake_python = directory / "python3"
+        fake_python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\nexit 17\n')
+        fake_python.chmod(0o755)
+        result = subprocess.run(
+            ["sh", str(path)],
+            cwd=directory,
+            env={
+                **os.environ,
+                "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(
+            result.stdout.splitlines()[-3:], ["--ref", "Kea-3.0.3", "--unplanned"]
+        )
+        self.assertFalse((directory / "copied").exists())
+
+    def test_clone_command_drift_leaves_both_kernel_builders_unchanged(self):
+        """Publish and Test fail before changing anything if an audited clone drifts."""
+        directory, repositories = self.kernel()
+        builder = directory / "build.py"
+        changed = KERNEL_BUILDER.replace(
+            "'clone', scm_url", "'clone', '--depth=1', scm_url"
+        )
+        builder.write_text(changed)
+        for planned in (True, False):
+            with (
+                self.subTest(planned=planned),
+                self.assertRaisesRegex(ValueError, "audited command"),
+            ):
+                if planned:
+                    sources.pin_recipe(self.root, "linux-kernel", repositories)
+                else:
+                    sources.retry_recipe_clones(self.root, "linux-kernel")
+            self.assertEqual(builder.read_text(), changed)
+            self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
     def test_repository_or_checkout_command_drift_fails(self):
         """Unexpected upstream changes cannot silently compile untracked sources."""

@@ -118,12 +118,18 @@ jobs:
           python3 workflow/scripts/package_sources.py pin \
             --root vyos-build/scripts/package-build \
             --package "${{ matrix.package }}" --sources "$SOURCE_REVISIONS"
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/workflow/scripts${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.source == null }}
+        name: Enable recipe source retries
+        run: |
+          python3 workflow/scripts/package_sources.py retry-clones \
+            --root vyos-build/scripts/package-build --package "${{ matrix.package }}"
       - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         name: Build the package
         env:
           PACKAGE_SOURCE_REVISIONS: ${{ toJSON(matrix.source.repositories || null) }}
-        run: python3 build.py
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/workflow/scripts${PYTHONPATH:+:$PYTHONPATH}"
+          python3 build.py
         working-directory: vyos-build/scripts/package-build/${{ matrix.package }}
       - name: Check and upload package artifacts
         uses: ./workflow/.github/actions/package-artifacts

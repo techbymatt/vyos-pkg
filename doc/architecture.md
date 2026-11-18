@@ -50,6 +50,7 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/plan_builds.py` | Git/GitHub/Pages boundaries, manifest comparison, diagnostics and `GITHUB_OUTPUT`. |
 | `scripts/source_identity.py` | Pure descriptor validation and canonical source hashing. No cloning/build policy. |
 | `scripts/package_sources.py` | Patched/historical recipe readers, bounded Git resolution, checked source pinning and its CLI. |
+| `scripts/git_network.py` | Scoped Git transport timeouts and retries; clean staging for clone attempts. |
 | `scripts/package_cache.py` | Source-key prefixes and newest-first visible key indexing. |
 | `scripts/legacy_package_cache.py` | Conservative v2-cache proofs from producer artifacts, historical recipes and successful build-step checkout evidence. |
 | `scripts/prepare_package_build.py` | Audited binary command registry and recipe/standalone preparation hooks. |
@@ -114,6 +115,14 @@ Execution must remain: downstream patches → build-mode preparation → source
 pinning (Publish) → build. Keep original ref labels for version metadata; checkout
 only the planned full commits. Never compile duplicate independent outputs on
 arm64 and delete them afterward.
+
+Both Test and Publish route audited recipe clones (including the kernel, nested
+VPP, and Kea) through `git_network.py`. Publish also uses it for Git ref lookups,
+metadata clones, and fetches of missing pinned commits. Known transient transport
+errors get up to three attempts, with 5s and 15s between attempts. Git aborts
+stalled HTTP transfers after 60s below 1 byte/s; each command also has a wall-clock
+limit. Retries do not change URLs or revisions, rerun build commands, or apply to
+kernel tarball/signing-key downloads, which are not Git operations.
 
 ## CI efficiency and limits
 

@@ -58,12 +58,27 @@ class TestWorkflowTests(unittest.TestCase):
             text,
         )
         self.assertIn('--sources "$SOURCE_REVISIONS"', text)
-        self.assertIn("PYTHONPATH=$GITHUB_WORKSPACE/workflow/scripts", text)
+        self.assertIn('export PYTHONPATH="$GITHUB_WORKSPACE/workflow/scripts', text)
         self.assertLess(
             text.index("prepare_package_build.py"), text.index("package_sources.py pin")
         )
         self.assertLess(
-            text.index("package_sources.py pin"), text.index("run: python3 build.py")
+            text.index("package_sources.py pin"), text.index("python3 build.py")
+        )
+
+    def test_unpinned_recipe_builds_also_retry_sources(self):
+        """Manual Test gets retry support without source pinning or caches."""
+        text = (WORKFLOWS / "build-recipe.yaml").read_text()
+        self.assertIn(
+            "steps.cache.outputs.cache-hit != 'true' && matrix.source == null", text
+        )
+        self.assertLess(
+            text.index("prepare_package_build.py"),
+            text.index("package_sources.py retry-clones"),
+        )
+        self.assertLess(
+            text.index("package_sources.py retry-clones"),
+            text.index("python3 build.py"),
         )
 
     def test_restore_migration_requires_an_exact_hit_and_validated_outputs(self):

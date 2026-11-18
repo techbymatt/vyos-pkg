@@ -78,6 +78,25 @@ def prepare(root: Path, package: str, arch: str) -> None:
     edits.commit()
 
 
+def stage_git_clones(root: Path, package: str, edits: CheckedEdits) -> None:
+    """Route the shared and kernel builders' audited clones through Git retries."""
+    builders = [(root / "build.py", "package['scm_url']")]
+    if package == "linux-kernel":
+        builders.append((root / package / "build.py", "scm_url"))
+    for builder, url in builders:
+        edits.replace(
+            builder,
+            f"run(['git', 'clone', {url}, str(repo_dir)], check=True)",
+            f"clone_repository(repo_dir, {url})",
+        )
+        edits.replace(
+            builder,
+            "from subprocess import run, CalledProcessError",
+            "from subprocess import run, CalledProcessError\n"
+            "from git_network import clone_repository",
+        )
+
+
 def prepare_frr(directory: Path, edits: CheckedEdits, arch: str, binary: str) -> None:
     """Retain FRR source builds and render libyang with the native binary mode."""
     # Upstream uses source builds to catch patch failures; keep those checks.
