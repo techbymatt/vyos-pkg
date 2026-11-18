@@ -1,39 +1,34 @@
 # Repository guidance
 
-`CLAUDE.md` symlinks here; keep one instruction source. Package additions: [README checklist](README.md#adding-packages). Module boundaries and extension points: [architecture guide](doc/architecture.md).
+`CLAUDE.md` symlinks here. See the [package checklist](README.md#adding-packages) and [pipeline map](doc/architecture.md).
 
-## Sources and build boundaries
+When committing, use Conventional Commit subjects (e.g. `fix(ci): retry source lookups`).
 
-- `build` recipes live in `techbymatt/tbm-vyos-patch`'s pinned `vyos-build/scripts/package-build/<name>/`, not this checkout. `build-extra` sources are standalone `vyos/<name>` repositories on `rolling`.
-- `scripts/package_catalog.json` owns **source**, not binary, names, standalone `deps` and build settings. Add via `python3 scripts/package_catalog.py add`; pin membership/deps in `scripts/test_package_catalog.py`. Do not add workflow package lists.
-- Manual **Test** takes comma-separated `package` (recipes), `package-extra` (standalone), and explicit `deps` (catalog deps are ignored). It disables caching. Unknown sources default to both architectures. Go setup is automatic for unknown recipes, opt-in (`go: true`) for catalogued recipes.
-- `architecture` defaults to `dual`, including mixed outputs. `independent_only` and `amd64_only` schedule amd64 only; no arm64-only policy exists. amd64 owns every `Architecture: all` binary: skip independent sub-builds on arm64 before execution, never delete duplicates afterward.
-- Recipe order: downstream patches → `scripts/prepare_package_build.py` → `scripts/package_sources.py pin` (Publish) → build. Pin every built clone to its planned full commit; retain original ref labels for version metadata.
-- Audit custom/nested build commands in `scripts/prepare_package_build.py`; custom clones need both discovery and pinning in `scripts/package_sources.py`. Stage adaptations with `scripts/checked_edits.py`; upstream drift must fail before writing. Keep `package_sources.checkout_source` importable by upstream builders.
-- Keep `scripts/build_matrix.py` and `scripts/source_identity.py` free of network/CLI lookups. Refactors must preserve canonical source encoding/cache keys.
+## Build sources
 
-## Focused checks and local safety
+- `build` recipes live in `techbymatt/tbm-vyos-patch`'s pinned `vyos-build/scripts/package-build/<name>/`; `build-extra` sources are `vyos/<name>` repositories on `rolling`.
+- `scripts/package_catalog.json` names **sources**, not binaries. Add with `python3 scripts/package_catalog.py add`; update membership/deps in `scripts/test_package_catalog.py`, not YAML package lists.
+- Run **Test** from your branch with `package=<recipe>` or `package-extra=<repo>` (comma-separated lists accepted). Test skips caches and Publish pins; recipes use the patch repo's default branch, and standalone `deps` comes from the input, not the catalog. Unknown sources build on both arches; Go is automatic for unknown recipes, opt-in for catalogued ones.
+- Default `dual` includes mixed outputs; `independent_only` and `amd64_only` run only on amd64. No arm64-only policy exists. Skip `Architecture: all` sub-builds on arm64; don't delete duplicates afterward.
+- Recipe order: downstream patches → `prepare_package_build.py` → `package_sources.py pin` (Publish) or `package_sources.py retry-clones` (Test) → build. Keep `package_sources.checkout_source` importable via `workflow/scripts`. Pin full commits without changing version labels; Intel cleanup must reset to `HEAD`, not `origin/main`.
+- Audit custom build commands in `prepare_package_build.py` and nested clones in both discovery and pinning (`package_sources.py`). Use `CheckedEdits` so upstream drift fails before writing. Retry transport, not whole builds or signature verification. Exhausted kernel key lookups must abort: the upstream package loop catches `CalledProcessError` and otherwise continues.
 
-- Python 3.11+, stdlib only. Fixtures need Git, Bash, gzip and bzip2; assembly tests fake Debian scanners, checksum tools and GPG.
-- Catalog: `python3 scripts/package_catalog.py validate`. Suite: `python3 -m unittest discover -s scripts -v`.
-- Module: `python3 -m unittest scripts.test_package_build_policy -v`. Single test: `python3 -m unittest scripts.test_package_build_policy.PolicyTests.test_empty_outputs_fail -v`.
-- Hooks: `pre-commit run --files <changed-files>`; `scripts/` or `.github/{workflows,actions}/` changes trigger the full suite. YAML: `actionlint .github/workflows/*.yaml`.
-- Known lint baselines: actionlint's unknown `ubuntu-26.04` label and two Ruff `TRY004`s in `scripts/package_catalog.py`/`scripts/publish_manifest.py`. Retain runner labels and the validators' `ValueError` contracts.
-- Debian build-mode tests skip without `dpkg-buildpackage`/`make`; macOS success is not real-build coverage. Static validation needs `dpkg` and `dpkg-deb`.
-- Never smoke-test with `scripts/build_repo.sh`: it moves `packages/rolling` inputs into `_site/deb` and signs after Jekyll. Use `python3 -m unittest scripts.test_build_repo -v` fixtures instead.
-- Upstream audits: `VYOS_BUILD_ROOT=/path/to/patched/vyos-build/scripts/package-build python3 -m unittest scripts.test_prepare_package_build.UpstreamRecipeTests scripts.test_package_sources.UpstreamSourceTests -v`. They use temporary copies without compiling upstream; skip when unset.
+## Local checks
 
-## Package and CI contracts
+- Match CI: `python3 scripts/package_catalog.py validate`, then `python3 -m unittest discover -s scripts -v` (Python 3.11+, stdlib). Inspect one matrix offline with `python3 scripts/plan_builds.py test --packages linux-kernel`.
+- Focused: `python3 -m unittest -v scripts.test_package_build_policy`; append `.PolicyTests.test_empty_outputs_fail` to the module for one case. `pre-commit run --files <changed-files>` runs the full suite for script or workflow/action changes.
+- Fixtures need Git, Bash, gzip and bzip2; assembly fakes scanners, checksums and GPG. Debian build-mode tests skip without `dpkg-buildpackage` and `make`; validation needs `dpkg`/`dpkg-deb`.
+- Upstream audit (copies only, no compilation): `VYOS_BUILD_ROOT=/path/to/patched/vyos-build/scripts/package-build python3 -m unittest scripts.test_prepare_package_build.UpstreamRecipeTests scripts.test_package_sources.UpstreamSourceTests -v`.
+- **Don't smoke-test `scripts/build_repo.sh` in this checkout**: it moves `packages/rolling` into `_site/deb` and signs after Jekyll. Use `python3 -m unittest scripts.test_build_repo -v`.
+- `actionlint .github/workflows/*.yaml` may flag `ubuntu-26.04`; keep the runner labels. Existing Ruff findings include `FURB162` (legacy timestamps) and `TRY004` (catalog/manifest validators must keep raising `ValueError`).
 
-- Fresh/restored outputs share the `package-paths`, `package-artifacts` and `package-cache-compression` actions. `scripts/package_layout.py` owns cache path order/metadata scope and file-only cleanup; preserve gzip compatibility, source directories and external symlink targets.
-- Verify downloads stay unmerged in `deb-<source>-<arch>` directories. Both callers pass planner `verify-plan` as `expected-artifacts` and `verify-arches` as `architectures`. This catches restore misses, not missing binaries within a producer; review the complete binary set in native Test artifacts.
-- Verification is static: never install packages, run maintainer scripts, or extract payloads onto the host. Lintian findings are advisory; failed/timed-out/unscanned packages fail Verify. Keep `--total-timeout 3600` within its 60-minute step.
-- Workflow/action YAML is tested as text in `scripts/test_test_workflow.py`. Preserve reusable builds, explicit App secrets for recipe/probe calls (never standalone), `persist-credentials: false`, and serialized publication gated on `techbymatt/vyos-pkg`, `rolling` and successful Verify. Keep eight restore slots aligned with `build_matrix.RESTORE_BATCH_SIZE`; network diagnostics must not gate builds or publication.
-- Planner stdout is `GITHUB_OUTPUT` assignments only; diagnostics go to stderr. Declare new outputs in the producing job's `outputs:` block.
+## CI and publication contracts
 
-## Cache and publication
-
-- `scripts/package_sources.py` fingerprints patched recipe trees, every built Git repository, and scoped consumer inputs. Kernel-only inputs include defaults/certificates and the sibling VPP recipe/repos through accel-PPP; Intel cleanup must reset to planned `HEAD`, never `origin/main`.
-- Source keys exclude shared builders, images, local helpers/workflows, unrelated inputs, catalog deps and execution settings. Run **Repository** with `force_rebuild` for local policy/tooling changes, unlocked APT/toolchain refreshes, and after signing-credential rotation; republishing alone can reuse binaries.
-- Legacy recipe caches need producer manifests, historical patched inputs and successful-build checkout evidence (`scripts/legacy_package_cache.py`); standalone hits use recorded commits. Never substitute today's refs/submodule pins. Missing/ambiguous proof rebuilds; metadata outages fail planning. Inaccessible-ref caches are diagnostic only. Save migrations after exact-hit/output checks.
-- Only deployed Pages `input-manifest.json` advances the publication baseline, never a local candidate. `scripts/publish_manifest.py` writes schema v2; retain v1 reads for legacy proofs.
+- `plan_builds.py` orchestrates lookups; keep `build_matrix.py` and `source_identity.py` pure. Planner stdout is `GITHUB_OUTPUT` assignments only. Log to stderr and declare outputs on the producing job.
+- Fingerprint patched recipe trees, actual Git commits and scoped inputs (kernel defaults, certificates, sibling VPP via accel-PPP). Local tooling/policy, images and catalog deps don't change source keys. Use **Repository** with `force_rebuild` after signing rotation or when local policy/toolchain or live APT changes must reach the binaries.
+- Legacy proofs use producer manifests and historical inputs, never today's refs. `legacy_package_cache.py` depends on checkout logs inside the successful `Build the package` step for recipes; standalone hits use recorded commits. Unproven hits rebuild; cache metadata outages fail planning. Inaccessible caches are diagnostic only.
+- Fresh/restored builds share the path, artifact and gzip actions. Preserve `package_layout.py`'s ordered paths and historical recipe metadata glob; clean files only, never source trees or external symlink targets. Save migrations only after an exact hit and output checks. Keep eight restore slots aligned with `build_matrix.RESTORE_BATCH_SIZE`.
+- Keep Verify downloads unmerged as `deb-<source>-<arch>`. Both callers pass `verify-plan`/`verify-arches` as `expected-artifacts`/`architectures`. This catches missing producers, not missing binaries; inspect native Test artifacts.
+- Verify is static: never install, run maintainer scripts or extract onto the host. Lintian findings are advisory; failed/incomplete scans fail Verify. Keep its `--total-timeout 3600` within the 60-minute step.
+- YAML contracts live in `scripts/test_test_workflow.py`. Keep reusable builds, explicit App secrets for recipe calls only and `persist-credentials: false`. Publication stays serialized and gated on `techbymatt/vyos-pkg`, `rolling` and successful Verify.
+- Only deployed Pages `input-manifest.json` advances the baseline. Preserve canonical source encoding/cache keys and schema-v1 reads for legacy proofs; write schema v2.
