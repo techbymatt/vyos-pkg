@@ -8,13 +8,14 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import TypeVar
 
-RETRY_DELAYS = (5, 15)
+try:
+    from .network_retry import retry_network
+except ImportError:
+    from network_retry import retry_network
+
 TRANSIENT_FAILURE = re.compile(
     r"^(?:fatal|error|ssh|kex_exchange_identification): .*(?:"
     r"could not resolve (?:host(?:name)?|proxy)|temporary failure in name resolution|"
@@ -25,7 +26,6 @@ TRANSIENT_FAILURE = re.compile(
     r"the requested URL returned error: (?:408|429|500|502|503|504)\b)",
     re.IGNORECASE | re.MULTILINE,
 )
-T = TypeVar("T")
 
 
 def _git(arguments: tuple[str, ...], cwd: Path | None, timeout: float) -> str:
@@ -59,40 +59,19 @@ def _git(arguments: tuple[str, ...], cwd: Path | None, timeout: float) -> str:
     return stdout.decode().strip()
 
 
-def _retry(operation: str, run: Callable[[], T]) -> T:
-    total = 1 + len(RETRY_DELAYS)
-    attempt = 1
-    while True:
-        try:
-            return run()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            if isinstance(error, subprocess.TimeoutExpired):
-                detail = f"attempt timed out after {error.timeout:g}s"
-                retryable = True
-            else:
-                detail = (error.stderr or "").strip()
-                if not detail:
-                    detail = f"exit status {error.returncode}"
-                retryable = TRANSIENT_FAILURE.search(detail) is not None
-            message = f"git {operation} attempt {attempt}/{total} failed"
-            if not retryable or attempt == total:
-                print(f"{message}: {detail}", file=sys.stderr, flush=True)
-                raise
-            delay = RETRY_DELAYS[attempt - 1]
-            print(
-                f"{message}; retrying in {delay}s: {detail}",
-                file=sys.stderr,
-                flush=True,
-            )
-        time.sleep(delay)
-        attempt += 1
+def _is_transient(detail: str) -> bool:
+    return TRANSIENT_FAILURE.search(detail) is not None
 
 
 def remote_git(
     operation: str, *arguments: str, cwd: Path | None = None, timeout: float = 120
 ) -> str:
     """Run a remote ref lookup or fetch, keeping diagnostics off stdout."""
-    return _retry(operation, lambda: _git((operation, *arguments), cwd, timeout))
+    return retry_network(
+        f"git {operation}",
+        lambda: _git((operation, *arguments), cwd, timeout),
+        _is_transient,
+    )
 
 
 def clone_repository(
@@ -111,4 +90,4 @@ def clone_repository(
             staging.rename(directory)
 
     print(f"Cloning into '{directory}'...", file=sys.stderr, flush=True)
-    _retry("clone", clone)
+    retry_network("git clone", clone, _is_transient)

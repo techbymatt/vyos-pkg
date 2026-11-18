@@ -4,6 +4,7 @@ Set VYOS_BUILD_ROOT to a patched scripts/package-build directory to exercise
 every adaptation against real upstream recipes (copies only; never builds them).
 """
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     from . import prepare_package_build as prepare
@@ -41,6 +43,29 @@ build_cmd = "dpkg-buildpackage -us -uc -tc -F --source-option=--tar-ignore=.git 
 [dependencies]
 packages = ["librtr-dev", "liblua5.3-dev", "libbpf-dev"]
 """
+
+KEY_LOOKUP = (
+    "run(['gpg2', '--locate-keys', 'torvalds@kernel.org', "
+    "'gregkh@kernel.org'], check=True)"
+)
+KERNEL_BUILDER = """import subprocess
+import sys
+from subprocess import run, CalledProcessError
+
+def build_kernel(source_exists=False):
+    if not source_exists:
+        KEY_LOOKUP
+        run(['curl', '-OL', 'linux.tar.xz'], check=True)
+        run(['gpg2', '--verify', 'linux.tar.sign', '-'], check=True)
+        run(['tar', 'xf', 'linux.tar.xz'], check=True)
+
+def build_packages():
+    try:
+        build_kernel()
+    except CalledProcessError:
+        pass  # Matches upstream's catch-and-continue package loop.
+    run(['./build-linux-firmware.sh'], check=True)
+""".replace("KEY_LOOKUP", KEY_LOOKUP)
 
 
 # Minimal legacy rules reproducing the upstream target layout, with real dpkg
@@ -429,6 +454,57 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual((self.root / "build.py").read_text(), before)
 
 
+class KernelPrepareTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.shared = self.root / "build.py"
+        self.shared.write_text("dpkg-buildpackage -uc -us -tc -F --source-option\n")
+        self.builder = self.root / "linux-kernel/build.py"
+        self.builder.parent.mkdir()
+        self.builder.write_text(KERNEL_BUILDER)
+
+    def kernel_fixture(self):
+        helper = mock.Mock()
+        self.enterContext(mock.patch.dict(sys.modules, {"kernel_keys": helper}))
+        prepare.prepare(self.root, "linux-kernel", "arm64")
+        builder = self.builder.read_text()
+        verify = "run(['gpg2', '--verify', 'linux.tar.sign', '-'], check=True)"
+        self.assertIn(verify, builder)
+        self.assertNotIn(KEY_LOOKUP, builder)
+        spec = importlib.util.spec_from_file_location("kernel_fixture", self.builder)
+        if spec is None or spec.loader is None:
+            raise ValueError("fixture builder cannot be imported")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        command = mock.Mock()
+        module.run = command
+        return module.build_packages, helper.locate_kernel_keys, command
+
+    def test_lookup_success_leaves_signature_verification_in_place(self):
+        build, locate, run = self.kernel_fixture()
+        build()
+        locate.assert_called_once_with("torvalds@kernel.org", "gregkh@kernel.org")
+        run.assert_any_call(["gpg2", "--verify", "linux.tar.sign", "-"], check=True)
+
+    def test_lookup_failure_stops_before_download_and_dependent_builds(self):
+        build, locate, run = self.kernel_fixture()
+        locate.side_effect = subprocess.CalledProcessError(2, ["gpg2", "--locate-keys"])
+        with self.assertRaisesRegex(SystemExit, "Failed to locate kernel signing keys"):
+            build()
+        run.assert_not_called()
+
+    def test_lookup_command_drift_leaves_both_builders_unmodified(self):
+        drifted = KERNEL_BUILDER.replace("'--locate-keys'", "'--locate-external-keys'")
+        self.builder.write_text(drifted)
+        original_shared = self.shared.read_text()
+        with self.assertRaisesRegex(ValueError, "audited command"):
+            prepare.prepare(self.root, "linux-kernel", "amd64")
+        self.assertEqual(self.shared.read_text(), original_shared)
+        self.assertEqual(self.builder.read_text(), drifted)
+
+
 @unittest.skipUnless(
     os.environ.get("VYOS_BUILD_ROOT"), "optional upstream recipe checkout"
 )
@@ -443,7 +519,6 @@ class UpstreamRecipeTests(unittest.TestCase):
                 [
                     *prepare.BINARY_COMMANDS,
                     *prepare.RECIPE_HOOKS,
-                    "linux-kernel",
                     "vyos-1x",
                 ]
             )
@@ -480,6 +555,9 @@ class UpstreamRecipeTests(unittest.TestCase):
                         self.assertIn("binary: binary-arch binary-indep", rules)
                     tomllib.loads((root / package / "package.toml").read_text())
                     compile((root / "build.py").read_text(), "build.py", "exec")
+                    if package == "linux-kernel":
+                        builder = root / package / "build.py"
+                        compile(builder.read_text(), str(builder), "exec")
 
 
 if __name__ == "__main__":

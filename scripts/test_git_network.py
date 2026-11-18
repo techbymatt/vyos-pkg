@@ -10,8 +10,10 @@ from unittest.mock import call, patch
 
 try:
     from . import git_network as network
+    from . import network_retry
 except ImportError:
     import git_network as network
+    import network_retry
 
 
 URL = "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git"
@@ -28,7 +30,7 @@ def failure(stderr):
 class GitNetworkTests(unittest.TestCase):
     def setUp(self):
         self.stderr = self.enterContext(redirect_stderr(io.StringIO()))
-        self.sleep = self.enterContext(patch.object(network.time, "sleep"))
+        self.sleep = self.enterContext(patch.object(network_retry.time, "sleep"))
 
     def test_transient_error_and_wall_timeout_retry_the_exact_request(self):
         request = ("fetch", "origin", "a" * 40)

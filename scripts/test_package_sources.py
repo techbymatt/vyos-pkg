@@ -15,11 +15,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from . import git_network
+    from . import git_network, network_retry
     from . import package_sources as sources
     from . import prepare_package_build as build_policy
 except ImportError:
     import git_network
+    import network_retry
     import package_sources as sources
     import prepare_package_build as build_policy
 
@@ -545,8 +546,8 @@ class GitResolutionTests(unittest.TestCase):
         refs = f"{COMMIT}\trefs/heads/rolling\n{OTHER_COMMIT}\trefs/tags/v1"
         with (
             patch.object(git_network, "_git", side_effect=[failure, refs]) as remote,
-            patch.object(git_network.time, "sleep") as delay,
-            patch.object(git_network.sys, "stderr"),
+            patch.object(network_retry.time, "sleep") as delay,
+            patch.object(network_retry.sys, "stderr"),
         ):
             self.assertEqual(self.resolver.resolve(URL, "rolling"), COMMIT)
             self.assertEqual(self.resolver.resolve(URL, "v1"), OTHER_COMMIT)
