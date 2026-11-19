@@ -275,9 +275,10 @@ class TestWorkflowTests(unittest.TestCase):
         script = textwrap.dedent(
             job_text(workflow, "placement").split("run: |\n", 1)[1]
         )
-        self.assertIn("gh api --paginate --slurp", script)
+        self.assertIn("gh api --paginate \\\n", script)
+        self.assertNotRegex(script, r"gh api[^\n]*--slurp")
         query = re.search(r"--jq '([^']+)'", script)[1]
-        self.assertIn(".[] | .jobs[]", query)
+        self.assertTrue(query.startswith(".jobs[] |"))
         name_filter = json.loads(re.search(r'test\((".*?")\)', query)[1])
         for name in ("Probe (amd64)", "Network diagnostics / Probe (arm64)"):
             self.assertRegex(name, name_filter)
@@ -285,6 +286,10 @@ class TestWorkflowTests(unittest.TestCase):
             self.assertNotRegex(name, name_filter)
         fixture = r"""timeout() { shift; "$@"; }
 gh() {
+  if [[ " $* " == *' --slurp '* && " $* " == *' --jq '* ]]; then
+    echo 'the --slurp option is not supported with --jq' >&2
+    return 1
+  fi
   case "$*" in
     *'/runs/42/attempts/2/jobs?per_page=100'*)
       printf '11\t%sProbe (amd64)\thttps://example.org/jobs/11\n' "$PROBE_JOB_PREFIX"

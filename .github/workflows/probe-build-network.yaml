@@ -156,10 +156,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Filter each page: gh rejects --slurp combined with --jq.
           # Called workflows prefix job names; publication can have over 100 jobs.
-          jobs=$(timeout 60s gh api --paginate --slurp \
+          jobs=$(timeout 60s gh api --paginate \
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '.[] | .jobs[] | select(.name | test("(^| / )Probe \\((amd64|arm64)\\)$")) | [.id, .name, .html_url] | @tsv')
+            --jq '.jobs[] | select(.name | test("(^| / )Probe \\((amd64|arm64)\\)$")) | [.id, .name, .html_url] | @tsv')
           {
             printf '%s\n\n' '### Build probe runner placement'
             printf '%s\n\n' 'Source: **Set up job → Runner Image Provisioner** in the probe job logs.'
