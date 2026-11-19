@@ -186,9 +186,6 @@ class TestWorkflowTests(unittest.TestCase):
         """Source compilation cannot read persisted credentials from the tools checkout."""
         for path in WORKFLOWS.glob("*.yaml"):
             text = path.read_text()
-            if path.name == "probe-kernel-wkd.yaml":
-                self.assertNotIn("uses: actions/checkout@", text)
-                continue
             # Extract action blocks directly, including steps with no name/id.
             checkouts = re.findall(
                 r"uses: actions/checkout@[^\n]*\n(.*?)(?=\n      -|\n    (?:strategy|timeout-minutes):|\Z)",
@@ -200,50 +197,26 @@ class TestWorkflowTests(unittest.TestCase):
                 with self.subTest(workflow=path.name):
                     self.assertIn("persist-credentials: false", checkout)
 
-    def test_wkd_probe_logs_all_host_family_pairs_after_a_failure(self):
-        """A failed connection still records its attempted IP and leaves other probes running."""
+    def test_build_probe_keeps_inventory_and_checkout_credentials_scoped(self):
+        """Only the owner can read the patch repo; a checkout failure does not skip probing."""
         workflow = (WORKFLOWS / "probe-kernel-wkd.yaml").read_text()
-        script = textwrap.dedent(job_text(workflow, "probe").split("run: |\n", 1)[1])
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            summary = root / "summary"
-            curl = root / "curl"
-            curl.write_text(
-                """#!/bin/bash
-case "$1 $2" in
-  '--version ')
-    echo 'curl fixture' ;;
-  '-q -4')
-    echo '*   Trying 192.0.2.8:443...' >&2
-    echo '192.0.2.8 | 200 | 0.01 | 0.02 | 0.03 | 0.04' ;;
-  '-q -6')
-    echo '*   Trying [2001:db8::8]:443...' >&2
-    echo ' | 000 | 0.01 | 0.00 | 0.00 | 20.00'
-    exit 28 ;;
-  *) exit 99 ;;
-esac
-"""
-            )
-            curl.chmod(0o755)
-            subprocess.run(
-                ["bash", "-e", "-o", "pipefail", "-c", script],
-                env={
-                    **os.environ,
-                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                    "PROBE_ARCH": "arm64",
-                },
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            report = summary.read_text()
-        for host in ("kernel.org", "www.kernel.org"):
-            self.assertIn(
-                f"| {host} | IPv4 | 0 | 192.0.2.8 | 192.0.2.8 | 200 | 0.01 | 0.02 | 0.03 | 0.04 |",
-                report,
-            )
-            self.assertIn(f"| {host} | IPv6 | 28 | [2001:db8::8] |  | 000 |", report)
+        inventory = job_text(workflow, "inventory")
+        probe = job_text(workflow, "probe")
+        for job in (inventory, probe):
+            self.assertIn("github.repository == 'techbymatt/vyos-pkg'", job)
+            self.assertIn("head.repo.full_name == github.repository", job)
+            self.assertIn("repositories: tbm-vyos-patch", job)
+            self.assertIn("permission-contents: read", job)
+        self.assertIn("targets: ${{ steps.targets.outputs.targets }}", inventory)
+        self.assertIn("needs: inventory", probe)
+        self.assertIn("if: ${{ !cancelled()", probe)
+        self.assertIn("needs.inventory.outputs.targets || '[]'", probe)
+        self.assertIn("bash scripts/probe_build_network.sh", probe)
+        public, private = probe.split(
+            "- name: Probe authenticated patch repository access"
+        )
+        self.assertNotIn("PATCH_TOKEN", public)
+        self.assertIn("PATCH_TOKEN: ${{ steps.app-token.outputs.token }}", private)
 
     def test_wkd_probe_reports_placement_from_the_probe_attempt(self):
         """Only the setup log establishes cloud/region; missing logs stay unknown."""

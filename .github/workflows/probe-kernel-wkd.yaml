@@ -1,12 +1,15 @@
 ---
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-name: Probe kernel.org WKD
+name: Probe build network
 on:
   workflow_dispatch:
   # Allow testing this workflow in a PR before it can be dispatched.
   pull_request:
     paths:
       - .github/workflows/probe-kernel-wkd.yaml
+      - scripts/build_probe_resources.json
+      - scripts/build_probe_targets.py
+      - scripts/probe_build_network.sh
 permissions: {}
 env:
   LC_ALL: C
@@ -14,8 +17,47 @@ defaults:
   run:
     shell: bash
 jobs:
+  inventory:
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Discover patched recipe sources
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    timeout-minutes: 8
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Checkout probe tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Generate read-only patch checkout token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: techbymatt
+          repositories: tbm-vyos-patch
+          permission-contents: read
+      - name: Checkout patch repository and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: techbymatt/tbm-vyos-patch
+          path: patch
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: List Git remotes and versioned kernel resources
+        id: targets
+        run: python3 scripts/build_probe_targets.py recipes --patch-root patch >> "$GITHUB_OUTPUT"
+
   probe:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # A failed patch checkout must not prevent probing GitHub and the other resources.
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: inventory
     name: Probe (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -31,41 +73,50 @@ jobs:
       image: ghcr.io/techbymatt/vyos-build@sha256:876781f24a30e68d56c9b6bfeada2034529fd11f92964aef3b780f891944cdba
       options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
     permissions:
+      contents: read
       packages: read
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - name: Probe WKD over IPv4 and IPv6
+      - name: Checkout probe tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github/workflows
+      - name: Generate read-only patch probe token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: techbymatt
+          repositories: tbm-vyos-patch
+          permission-contents: read
+      - name: Probe build resources over IPv4 and IPv6
         env:
           PROBE_ARCH: ${{ matrix.arch }}
+          RECIPE_INVENTORY: ${{ needs.inventory.result }}
+          RECIPE_TARGETS: ${{ needs.inventory.outputs.targets || '[]' }}
         run: |
-          curl --version
-          trace=$(mktemp)
-          trap 'rm -f -- "$trace"' EXIT
-          {
-            printf '### WKD HTTPS probes (%s)\n\n' "$PROBE_ARCH"
-            printf '%s\n\n' 'Times are seconds from request start to each milestone. On failure, an empty IP or zero time may mean the phase did not complete; HTTP 000 means no response.'
-            printf '%s\n' '| Host | Family | curl exit | Tried IPs | Connected IP | HTTP | DNS | TCP | TLS | Total |' \
-              '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-          for host in kernel.org www.kernel.org; do
-            for family in 4 6; do
-              url="https://$host/.well-known/openpgpkey/policy"
-              printf '::group::curl -%s %s\n' "$family" "$url"
-              rc=0
-              # Isolate each direct path: no proxy, retries, or redirects.
-              metrics=$(curl -q "-$family" --noproxy '*' --silent --show-error --verbose \
-                --connect-timeout 20 --max-time 25 --output /dev/null \
-                --write-out '%{remote_ip} | %{http_code} | %{time_namelookup} | %{time_connect} | %{time_appconnect} | %{time_total}' \
-                "$url" 2>"$trace") || rc=$?
-              # Log connection diagnostics, not headers received from the server.
-              awk '/^\*[[:space:]]+(Trying|Host|IPv[46]:|Connected to|Failed to connect|Immediate connect fail) |^curl: \([0-9]+\)/' "$trace"
-              printf '%s\n' '::endgroup::'
-              # remote_ip is empty if TCP never connected; keep attempted IPs too.
-              tried=$(sed -nE 's/^\* +Trying (.*):443\.\.\.$/\1/p' "$trace" | paste -sd ',' -)
-              printf '| %s | IPv%s | %s | %s | %s |\n' "$host" "$family" "$rc" "${tried:--}" "$metrics" | tee -a "$GITHUB_STEP_SUMMARY"
-            done
-          done
+          printf '%s\n' "$RECIPE_TARGETS" > "$RUNNER_TEMP/recipe-targets.json"
+          python3 scripts/build_probe_targets.py inventory --arch "$PROBE_ARCH" \
+            --repository "$GITHUB_REPOSITORY" --recipes "$RUNNER_TEMP/recipe-targets.json" \
+            > "$RUNNER_TEMP/build-probes.tsv"
+          bash scripts/probe_build_network.sh "$RUNNER_TEMP/build-probes.tsv"
+      - name: Probe authenticated patch repository access
+        if: ${{ !cancelled() }}
+        env:
+          PROBE_ARCH: ${{ matrix.arch }}
+          RECIPE_INVENTORY: ${{ needs.inventory.result }}
+          PATCH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          label='Private patch checkout (authenticated)'
+          if [[ -z "$PATCH_TOKEN" ]]; then label='Private patch checkout (anonymous)'; fi
+          printf '%s\t%s\t%s\n' git "$label" \
+            https://github.com/techbymatt/tbm-vyos-patch.git > "$RUNNER_TEMP/patch-probe.tsv"
+          bash scripts/probe_build_network.sh "$RUNNER_TEMP/patch-probe.tsv"
 
   placement:
     if: ${{ !cancelled() && needs.probe.result != 'skipped' }}
@@ -84,7 +135,7 @@ jobs:
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             --jq '.jobs[] | select(.name | startswith("Probe (")) | [.id, .name, .html_url] | @tsv')
           {
-            printf '%s\n\n' '### WKD probe runner placement'
+            printf '%s\n\n' '### Build probe runner placement'
             printf '%s\n\n' 'Source: **Set up job → Runner Image Provisioner** in the probe job logs.'
             printf '%s\n' '| Job | Cloud | Region |' '| --- | --- | --- |'
             while IFS=$'\t' read -r id name url; do

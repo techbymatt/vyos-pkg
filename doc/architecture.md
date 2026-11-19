@@ -117,6 +117,33 @@ arm64 and delete them afterward.
 
 ## CI efficiency and limits
 
+### Build network diagnostics
+
+**Probe build network** (`probe-kernel-wkd.yaml`) compares direct IPv4 and IPv6
+from the native build containers. It also runs on same-repository pull requests
+that change the probe. The inventory reads the patch repository's pinned,
+patched recipes and submodule URLs, plus the catalog's standalone repos. It does
+not resolve external source refs. The private checkout and its dedicated probe
+use read-only App tokens scoped to the patch repository; other probes are
+anonymous. If the patch checkout fails, the jobs still test the independently
+known targets and flag the missing recipe inventory.
+
+The probe requests Git's ref advertisement, WKD policies and public keys on both
+hosts, the kernel signature, APT index URLs from the container, and the
+endpoints listed in `scripts/build_probe_resources.json`. Large archives use
+HEAD. Keep the audited Boost, kernel-driver and VPP download URLs in that file
+in sync with the recipes; registry URLs are reachability samples, not dependency
+locks. The probe does not fetch Git objects or recursively resolve dependencies
+of Cargo, Go, pip, RubyGems or APT, and cannot diagnose registry pulls or GitHub
+Actions downloads that fail before the jobs start. A 401, 403 or 405 still shows
+the network path answered; it does not prove the build can use that resource.
+
+The run summary records attempted and connected IPs, exit codes, HTTP responses,
+DNS/TCP/TLS timings and redirects, with cloud/region taken from the jobs' setup
+logs. Results are diagnostic only and do not change build or publication gates.
+
+### Build and publication limits
+
 - Source discovery and isolated-index patching are serial/memoized. Up to eight
   independent URL lookups run concurrently; refs for each URL share one snapshot
   and clone. All lookups must finish successfully before cache routing.

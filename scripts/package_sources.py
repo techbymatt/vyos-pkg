@@ -17,11 +17,10 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlsplit
-
-import tomllib
 
 try:
     from . import package_catalog as catalog
@@ -60,6 +59,7 @@ __all__ = [
     "cache_prefix",
     "canonical_bytes",
     "checkout_source",
+    "discover_sources",
     "fingerprint",
     "pin_recipe",
     "revision",
@@ -425,21 +425,13 @@ def kea_repository(script: str) -> dict:
     }
 
 
-def resolve_sources(
-    reader: RecipeReader,
-    resolver: Resolver,
-    sources: dict,
-    patch_commit: str,
-    *,
-    jobs: int = SOURCE_JOBS,
-) -> dict:
-    """Discover sources serially, then resolve independent remotes in parallel."""
+def discover_sources(reader: RecipeReader, sources: dict, patch_commit: str) -> dict:
+    """Describe catalogued sources without contacting their Git remotes."""
     descriptions = {}
     for definition in catalog.iter_sources(sources):
         group, name = definition.group, definition.name
         if group == "build":
             source = reader.recipe(name, patch_commit)
-            commit = reader.legacy_revision(name, patch_commit)
         else:
             source = {
                 "recipe_tree": None,
@@ -452,23 +444,36 @@ def resolve_sources(
                     }
                 ],
             }
-            commit = None
-        descriptions[group, name] = source, commit
+        descriptions[group, name] = source
+    return descriptions
+
+
+def resolve_sources(
+    reader: RecipeReader,
+    resolver: Resolver,
+    sources: dict,
+    patch_commit: str,
+    *,
+    jobs: int = SOURCE_JOBS,
+) -> dict:
+    """Discover sources serially, then resolve independent remotes in parallel."""
+    descriptions = discover_sources(reader, sources, patch_commit)
+    legacy = {
+        (group, name): reader.legacy_revision(name, patch_commit)
+        for group, name in descriptions
+        if group == "build"
+    }
     commits = resolver.resolve_many(
-        [
-            entry
-            for source, _ in descriptions.values()
-            for entry in source["repositories"]
-        ],
+        [entry for source in descriptions.values() for entry in source["repositories"]],
         jobs=jobs,
     )
     result = {}
-    for identity, (source, commit) in descriptions.items():
+    for identity, source in descriptions.items():
         for repository in source["repositories"]:
             repository["commit"] = commits[repository["url"], repository["ref"]]
         source = validate_source(source)
         result[identity] = {
-            "commit": commit or source["repositories"][0]["commit"],
+            "commit": legacy.get(identity) or source["repositories"][0]["commit"],
             "source": source,
             "source_digest": fingerprint(source),
         }
