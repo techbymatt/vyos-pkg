@@ -1,0 +1,181 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Probe build network
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Multi-architecture build image to probe from (prefer a digest).
+        default: ghcr.io/techbymatt/vyos-build:rolling
+        type: string
+      build-ref:
+        description: Patch repository revision; empty uses its default branch.
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      image:
+        description: The caller's resolved multi-architecture build image.
+        required: true
+        type: string
+      build-ref:
+        description: Patch repository revision; empty uses its default branch.
+        default: ""
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+  # Allow testing this workflow in a PR before it can be dispatched.
+  pull_request:
+    paths:
+      - .github/workflows/probe-build-network.yaml
+      - scripts/build_probe_resources.json
+      - scripts/build_probe_targets.py
+      - scripts/probe_build_network.sh
+permissions: {}
+env:
+  LC_ALL: C
+defaults:
+  run:
+    shell: bash
+jobs:
+  inventory:
+    if: ${{ github.repository == 'techbymatt/vyos-pkg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Discover patched recipe sources
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    timeout-minutes: 8
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Checkout probe tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Generate read-only patch checkout token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: techbymatt
+          repositories: tbm-vyos-patch
+          permission-contents: read
+      - name: Checkout patch repository and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: techbymatt/tbm-vyos-patch
+          ref: ${{ inputs.build-ref }}
+          path: patch
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: List Git remotes and versioned kernel resources
+        id: targets
+        run: python3 scripts/build_probe_targets.py recipes --patch-root patch >> "$GITHUB_OUTPUT"
+
+  probe:
+    # A failed patch checkout must not prevent probing GitHub and the other resources.
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: inventory
+    name: Probe (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    container:
+      # Publication passes its resolved image; PR probes use the rolling image.
+      image: ${{ inputs.image || 'ghcr.io/techbymatt/vyos-build:rolling' }}
+      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout probe tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github/workflows
+      - name: Generate read-only patch probe token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: techbymatt
+          repositories: tbm-vyos-patch
+          permission-contents: read
+      - name: Probe build resources over IPv4 and IPv6
+        env:
+          PROBE_ARCH: ${{ matrix.arch }}
+          RECIPE_INVENTORY: ${{ needs.inventory.result }}
+          RECIPE_TARGETS: ${{ needs.inventory.outputs.targets || '[]' }}
+        run: |
+          printf '%s\n' "$RECIPE_TARGETS" > "$RUNNER_TEMP/recipe-targets.json"
+          python3 scripts/build_probe_targets.py inventory --arch "$PROBE_ARCH" \
+            --repository "$GITHUB_REPOSITORY" --recipes "$RUNNER_TEMP/recipe-targets.json" \
+            > "$RUNNER_TEMP/build-probes.tsv"
+          bash scripts/probe_build_network.sh "$RUNNER_TEMP/build-probes.tsv"
+      - name: Probe authenticated patch repository access
+        if: ${{ !cancelled() }}
+        env:
+          PROBE_ARCH: ${{ matrix.arch }}
+          RECIPE_INVENTORY: ${{ needs.inventory.result }}
+          PATCH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          label='Private patch checkout (authenticated)'
+          if [[ -z "$PATCH_TOKEN" ]]; then label='Private patch checkout (anonymous)'; fi
+          printf '%s\t%s\t%s\n' git "$label" \
+            https://github.com/techbymatt/tbm-vyos-patch.git > "$RUNNER_TEMP/patch-probe.tsv"
+          bash scripts/probe_build_network.sh "$RUNNER_TEMP/patch-probe.tsv"
+
+  placement:
+    if: ${{ !cancelled() && needs.probe.result != 'skipped' }}
+    name: Report runner cloud and region
+    needs: probe
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    timeout-minutes: 3
+    steps:
+      - name: Read probe runner placement from setup logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Filter each page: gh rejects --slurp combined with --jq.
+          # Called workflows prefix job names; publication can have over 100 jobs.
+          jobs=$(timeout 60s gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | test("(^| / )Probe \\((amd64|arm64)\\)$")) | [.id, .name, .html_url] | @tsv')
+          {
+            printf '%s\n\n' '### Build probe runner placement'
+            printf '%s\n\n' 'Source: **Set up job → Runner Image Provisioner** in the probe job logs.'
+            printf '%s\n' '| Job | Cloud | Region |' '| --- | --- | --- |'
+            while IFS=$'\t' read -r id name url; do
+              [[ -n "$id" ]] || continue
+              placement=$(timeout 20s gh api --allow-escape-sequences \
+                "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" | awk '
+                  { sub(/\r$/, "") }
+                  !done && / ##\[group\]Runner Image Provisioner$/ { setup = 1; next }
+                  setup && / ##\[endgroup\]$/ { setup = 0; done = 1 }
+                  setup && / Cloud: [-[:alnum:]_.]+$/ { cloud = $NF }
+                  setup && / Region: [-[:alnum:]_.]+$/ { region = $NF }
+                  END { printf "%s | %s", (cloud ? cloud : "unavailable"), (region ? region : "unavailable") }
+                ') || placement='unavailable | unavailable'
+              printf '| [%s](%s) | %s |\n' "$name" "$url" "$placement"
+            done <<< "$jobs"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
