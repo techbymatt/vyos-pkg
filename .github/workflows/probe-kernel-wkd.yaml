@@ -1,0 +1,103 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Probe kernel.org WKD
+on:
+  workflow_dispatch:
+  # Allow testing this workflow in a PR before it can be dispatched.
+  pull_request:
+    paths:
+      - .github/workflows/probe-kernel-wkd.yaml
+permissions: {}
+env:
+  LC_ALL: C
+defaults:
+  run:
+    shell: bash
+jobs:
+  probe:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    name: Probe (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    container:
+      # Pin the multi-arch image and match the container networking options from run 44421843966.
+      image: ghcr.io/techbymatt/vyos-build@sha256:876781f24a30e68d56c9b6bfeada2034529fd11f92964aef3b780f891944cdba
+      options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
+    permissions:
+      packages: read
+    timeout-minutes: 5
+    steps:
+      - name: Probe WKD over IPv4 and IPv6
+        env:
+          PROBE_ARCH: ${{ matrix.arch }}
+        run: |
+          curl --version
+          trace=$(mktemp)
+          trap 'rm -f -- "$trace"' EXIT
+          {
+            printf '### WKD HTTPS probes (%s)\n\n' "$PROBE_ARCH"
+            printf '%s\n\n' 'Times are seconds from request start to each milestone. On failure, an empty IP or zero time may mean the phase did not complete; HTTP 000 means no response.'
+            printf '%s\n' '| Host | Family | curl exit | Tried IPs | Connected IP | HTTP | DNS | TCP | TLS | Total |' \
+              '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          for host in kernel.org www.kernel.org; do
+            for family in 4 6; do
+              url="https://$host/.well-known/openpgpkey/policy"
+              printf '::group::curl -%s %s\n' "$family" "$url"
+              rc=0
+              # Isolate each direct path: no proxy, retries, or redirects.
+              metrics=$(curl -q "-$family" --noproxy '*' --silent --show-error --verbose \
+                --connect-timeout 20 --max-time 25 --output /dev/null \
+                --write-out '%{remote_ip} | %{http_code} | %{time_namelookup} | %{time_connect} | %{time_appconnect} | %{time_total}' \
+                "$url" 2>"$trace") || rc=$?
+              # Log connection diagnostics, not headers received from the server.
+              awk '/^\*[[:space:]]+(Trying|Host|IPv[46]:|Connected to|Failed to connect|Immediate connect fail) |^curl: \([0-9]+\)/' "$trace"
+              printf '%s\n' '::endgroup::'
+              # remote_ip is empty if TCP never connected; keep attempted IPs too.
+              tried=$(sed -nE 's/^\* +Trying (.*):443\.\.\.$/\1/p' "$trace" | paste -sd ',' -)
+              printf '| %s | IPv%s | %s | %s | %s |\n' "$host" "$family" "$rc" "${tried:--}" "$metrics" | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+          done
+
+  placement:
+    if: ${{ !cancelled() && needs.probe.result != 'skipped' }}
+    name: Report runner cloud and region
+    needs: probe
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    timeout-minutes: 3
+    steps:
+      - name: Read probe runner placement from setup logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs=$(timeout 20s gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("Probe (")) | [.id, .name, .html_url] | @tsv')
+          {
+            printf '%s\n\n' '### WKD probe runner placement'
+            printf '%s\n\n' 'Source: **Set up job → Runner Image Provisioner** in the probe job logs.'
+            printf '%s\n' '| Job | Cloud | Region |' '| --- | --- | --- |'
+            while IFS=$'\t' read -r id name url; do
+              [[ -n "$id" ]] || continue
+              placement=$(timeout 20s gh api --allow-escape-sequences \
+                "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" | awk '
+                  { sub(/\r$/, "") }
+                  !done && / ##\[group\]Runner Image Provisioner$/ { setup = 1; next }
+                  setup && / ##\[endgroup\]$/ { setup = 0; done = 1 }
+                  setup && / Cloud: [-[:alnum:]_.]+$/ { cloud = $NF }
+                  setup && / Region: [-[:alnum:]_.]+$/ { region = $NF }
+                  END { printf "%s | %s", (cloud ? cloud : "unavailable"), (region ? region : "unavailable") }
+                ') || placement='unavailable | unavailable'
+              printf '| [%s](%s) | %s |\n' "$name" "$url" "$placement"
+            done <<< "$jobs"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
