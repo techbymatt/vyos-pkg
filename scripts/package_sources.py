@@ -25,7 +25,9 @@ from urllib.parse import quote, urlsplit
 try:
     from . import package_catalog as catalog
     from .checked_edits import CheckedEdits
+    from .git_network import clone_repository, remote_git
     from .package_cache import cache_prefix
+    from .prepare_package_build import stage_git_clones
     from .source_identity import (
         REVISION,
         fingerprint,
@@ -39,7 +41,9 @@ try:
 except ImportError:
     import package_catalog as catalog
     from checked_edits import CheckedEdits
+    from git_network import clone_repository, remote_git
     from package_cache import cache_prefix
+    from prepare_package_build import stage_git_clones
     from source_identity import (
         REVISION,
         fingerprint,
@@ -110,7 +114,7 @@ class Resolver:
             commit = ref.lower()
         else:
             if url not in self.remotes:
-                output = command_output(["git", "ls-remote", "--", url])
+                output = remote_git("ls-remote", "--", url)
                 self.remotes[url] = {
                     name: revision(sha)
                     for sha, name in (line.split() for line in output.splitlines())
@@ -206,17 +210,8 @@ class Resolver:
                 directory = (
                     Path(self.temporary.name) / hashlib.sha256(url.encode()).hexdigest()
                 )
-                command_output(
-                    [
-                        "git",
-                        "clone",
-                        "--bare",
-                        "--filter=blob:none",
-                        "--",
-                        url,
-                        str(directory),
-                    ],
-                    timeout=300,
+                clone_repository(
+                    directory, url, "--bare", "--filter=blob:none", timeout=300
                 )
                 self.repositories[url] = directory
             commit = git(
@@ -494,15 +489,28 @@ def checkout_source(directory: Path, url: str, ref: str) -> None:
     try:
         git(directory, "cat-file", "-e", f"{commit}^{{commit}}")
     except subprocess.CalledProcessError:
-        git(directory, "fetch", "origin", commit, timeout=300)
+        remote_git("fetch", "origin", commit, cwd=directory, timeout=300)
     git(directory, "checkout", "--detach", commit)
     print(f"Source checkout: {url} {ref} -> {commit}", flush=True)
 
 
 def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
-    """Adapt audited Git checkout commands without rewriting version labels."""
+    """Adapt audited Git clones and checkouts without rewriting version labels."""
     edits = CheckedEdits()
     stage_recipe_pins(root, package, repositories, edits)
+    stage_git_clones(root, package, edits)
+    edits.commit()
+
+
+def retry_recipe_clones(root: Path, package: str) -> None:
+    """Make Test clones resilient without changing the recipe's original refs."""
+    catalog.validate_name(package)
+    edits = CheckedEdits()
+    stage_git_clones(root, package, edits)
+    if package == "isc-kea":
+        script = root / package / "prebuild.sh"
+        repository = kea_repository(edits.read(script))
+        stage_kea_clone(script, repository["url"], edits, pinned=False)
     edits.commit()
 
 
@@ -584,38 +592,53 @@ def stage_recipe_pins(
         repository = next(
             entry for entry in repositories if entry["name"] == "kea-packaging"
         )
-        edits.replace(
-            directory / "prebuild.sh",
-            KEA_CLONE + repository["url"],
-            "python3 -m package_sources checkout --directory kea-packaging --url "
-            + shlex.quote(repository["url"])
-            + ' --ref "$BRANCH"',
+        stage_kea_clone(
+            directory / "prebuild.sh", repository["url"], edits, pinned=True
         )
 
 
+def stage_kea_clone(path: Path, url: str, edits: CheckedEdits, *, pinned: bool) -> None:
+    """Use the retrying clone helper and stop the hook if cloning fails."""
+    command = (
+        "python3 -m package_sources checkout --directory kea-packaging --url "
+        + shlex.quote(url)
+        + ' --ref "$BRANCH"'
+    )
+    if not pinned:
+        command += " --unplanned"
+    edits.replace(path, KEA_CLONE + url, command + " || exit $?")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Pin recipe commands or perform a nested clone at its planned revision."""
+    """Adapt recipe commands or perform an audited nested clone."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     pin = commands.add_parser("pin")
     pin.add_argument("--root", type=Path, required=True)
     pin.add_argument("--package", required=True)
     pin.add_argument("--sources", required=True)
+    retry = commands.add_parser("retry-clones")
+    retry.add_argument("--root", type=Path, required=True)
+    retry.add_argument("--package", required=True)
     checkout = commands.add_parser("checkout")
     checkout.add_argument("--directory", type=Path, required=True)
     checkout.add_argument("--url", required=True)
     checkout.add_argument("--ref", required=True)
+    checkout.add_argument("--unplanned", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "pin":
             pin_recipe(args.root, args.package, json.loads(args.sources))
+        elif args.command == "retry-clones":
+            retry_recipe_clones(args.root, args.package)
         else:
             source_text(args.url, "URL")
-            if not args.directory.exists():
-                command_output(
-                    ["git", "clone", "--", args.url, str(args.directory)], timeout=300
-                )
-            checkout_source(args.directory, args.url, args.ref)
+            if args.unplanned:
+                clone_repository(args.directory, args.url, "--branch", args.ref)
+            else:
+                if not args.directory.exists():
+                    clone_repository(args.directory, args.url, timeout=300)
+                checkout_source(args.directory, args.url, args.ref)
     except (
         OSError,
         ValueError,

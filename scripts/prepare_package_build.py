@@ -78,6 +78,49 @@ def prepare(root: Path, package: str, arch: str) -> None:
     edits.commit()
 
 
+def stage_git_clones(root: Path, package: str, edits: CheckedEdits) -> None:
+    """Route the shared and kernel builders' audited clones through Git retries."""
+    builders = [(root / "build.py", "package['scm_url']")]
+    if package == "linux-kernel":
+        builders.append((root / package / "build.py", "scm_url"))
+    for builder, url in builders:
+        edits.replace(
+            builder,
+            f"run(['git', 'clone', {url}, str(repo_dir)], check=True)",
+            f"clone_repository(repo_dir, {url})",
+        )
+        edits.replace(
+            builder,
+            "from subprocess import run, CalledProcessError",
+            "from subprocess import run, CalledProcessError\n"
+            "from git_network import clone_repository",
+        )
+
+
+def prepare_kernel(
+    directory: Path, edits: CheckedEdits, _arch: str, _binary: str
+) -> None:
+    """Retry key discovery and abort before building kernel-dependent packages."""
+    builder = directory / "build.py"
+    edits.replace(
+        builder,
+        "from subprocess import run, CalledProcessError",
+        "from subprocess import run, CalledProcessError\n"
+        "from kernel_keys import locate_kernel_keys",
+    )
+    # The outer package loop catches CalledProcessError and tries dependent
+    # builds anyway. Fail here on key lookup failure, without touching --verify.
+    edits.replace(
+        builder,
+        "\n        run(['gpg2', '--locate-keys', 'torvalds@kernel.org', "
+        "'gregkh@kernel.org'], check=True)\n",
+        "\n        try:\n"
+        "            locate_kernel_keys('torvalds@kernel.org', 'gregkh@kernel.org')\n"
+        "        except (OSError, subprocess.SubprocessError) as e:\n"
+        '            sys.exit(f"Failed to locate kernel signing keys: {e}")\n',
+    )
+
+
 def prepare_frr(directory: Path, edits: CheckedEdits, arch: str, binary: str) -> None:
     """Retain FRR source builds and render libyang with the native binary mode."""
     # Upstream uses source builds to catch patch failures; keep those checks.
@@ -191,6 +234,7 @@ def stage_udp_packaging(
 
 RECIPE_HOOKS = {
     "frr": prepare_frr,
+    "linux-kernel": prepare_kernel,
     "strongswan": prepare_strongswan,
     "udp-broadcast-relay": stage_udp_packaging,
 }

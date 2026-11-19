@@ -50,6 +50,9 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/plan_builds.py` | Git/GitHub/Pages boundaries, manifest comparison, diagnostics and `GITHUB_OUTPUT`. |
 | `scripts/source_identity.py` | Pure descriptor validation and canonical source hashing. No cloning/build policy. |
 | `scripts/package_sources.py` | Patched/historical recipe readers, bounded Git resolution, checked source pinning and its CLI. |
+| `scripts/network_retry.py` | Shared bounded backoff with tool-specific transient error checks. |
+| `scripts/git_network.py` | Scoped Git transport timeouts and retries; clean staging for clone attempts. |
+| `scripts/kernel_keys.py` | Retry lookup of the kernel recipe's public signing keys. |
 | `scripts/package_cache.py` | Source-key prefixes and newest-first visible key indexing. |
 | `scripts/legacy_package_cache.py` | Conservative v2-cache proofs from producer artifacts, historical recipes and successful build-step checkout evidence. |
 | `scripts/prepare_package_build.py` | Audited binary command registry and recipe/standalone preparation hooks. |
@@ -114,6 +117,16 @@ Execution must remain: downstream patches → build-mode preparation → source
 pinning (Publish) → build. Keep original ref labels for version metadata; checkout
 only the planned full commits. Never compile duplicate independent outputs on
 arm64 and delete them afterward.
+
+Both Test and Publish route audited recipe clones (including the kernel, nested
+VPP, and Kea) through `git_network.py`. Publish also uses it for Git ref lookups,
+metadata clones, and fetches of missing pinned commits. Git aborts stalled HTTP
+transfers after 60s below 1 byte/s; each command also has a wall-clock limit.
+While preparing the kernel recipe, the GPG key lookup is also adapted to retry
+transient Web Key Directory (WKD) failures, with a 90s limit per attempt. Both
+helpers use up to three attempts, waiting 5s and 15s between attempts. A failed
+key lookup stops the kernel build; tarball downloads and signature verification
+remain unchanged. Retries do not change Git URLs/revisions or the GPG key source.
 
 ## CI efficiency and limits
 
