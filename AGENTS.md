@@ -28,7 +28,7 @@
 - Fresh/restored outputs share the `package-paths`, `package-artifacts` and `package-cache-compression` actions. `scripts/package_layout.py` owns cache path order/metadata scope and file-only cleanup; preserve gzip compatibility, source directories and external symlink targets.
 - Verify downloads stay unmerged in `deb-<source>-<arch>` directories. Both callers pass planner `verify-plan` as `expected-artifacts` and `verify-arches` as `architectures`. This catches restore misses, not missing binaries within a producer; review the complete binary set in native Test artifacts.
 - Verification is static: never install packages, run maintainer scripts, or extract payloads onto the host. Lintian findings are advisory; failed/timed-out/unscanned packages fail Verify. Keep `--total-timeout 3600` within its 60-minute step.
-- Workflow/action YAML is tested as text in `scripts/test_test_workflow.py`. Preserve reusable builds, explicit App secrets for recipe calls only, `persist-credentials: false`, and serialized publication gated on `techbymatt/vyos-pkg`, `rolling` and successful Verify. Keep eight restore slots aligned with `build_matrix.RESTORE_BATCH_SIZE`.
+- Workflow/action YAML is tested as text in `scripts/test_test_workflow.py`. Preserve reusable builds, explicit App secrets for recipe/probe calls (never standalone), `persist-credentials: false`, and serialized publication gated on `techbymatt/vyos-pkg`, `rolling` and successful Verify. Keep eight restore slots aligned with `build_matrix.RESTORE_BATCH_SIZE`; network diagnostics must not gate builds or publication.
 - Planner stdout is `GITHUB_OUTPUT` assignments only; diagnostics go to stderr. Declare new outputs in the producing job's `outputs:` block.
 
 ## Cache and publication

@@ -120,8 +120,16 @@ arm64 and delete them afterward.
 ### Build network diagnostics
 
 **Probe build network** (`probe-build-network.yaml`) compares direct IPv4 and IPv6
-from the native build containers. It also runs on same-repository pull requests
-that change the probe. The inventory reads the patch repository's pinned,
+from the native build containers. Publish calls it once after the cache check,
+in parallel with builds/restores, using the resolved build image and patch
+revision. Unchanged runs skip diagnostics; failed planning still triggers them,
+falling back to the rolling image or patch default branch if those inputs could
+not be resolved. Builds, Verify and Publish do not depend on the probe result.
+These are separate runners, not measurements from each package build's runner.
+
+The reusable workflow declares `image` and `build-ref` inputs and accepts only
+the two named App secrets. It remains manually dispatchable and runs on
+same-repository pull requests that change the probe. The inventory reads the pinned,
 patched recipes and submodule URLs, plus the catalog's standalone repos. It does
 not resolve external source refs. The private checkout and its dedicated probe
 use read-only App tokens scoped to the patch repository; other probes are
@@ -140,7 +148,8 @@ the network path answered; it does not prove the build can use that resource.
 
 The run summary records attempted and connected IPs, exit codes, HTTP responses,
 DNS/TCP/TLS timings and redirects, with cloud/region taken from the jobs' setup
-logs. Results are diagnostic only and do not change build or publication gates.
+logs across all API pages, including reusable-workflow job name prefixes.
+Results are diagnostic only and do not change build or publication gates.
 
 ### Build and publication limits
 
@@ -201,5 +210,6 @@ Identical binary identities may repeat only when their SHA256 bytes agree;
 Do not run `build_repo.sh` against this checkout as a local test. Its fixtures
 use disposable inputs and fake Debian scanners/checksum/signing tools. Production
 publication remains repository-gated, serialized, and conditional on successful
-verification. App secrets are explicitly passed only to recipe workflow calls,
-and untrusted source checkouts must not persist credentials.
+verification. App secrets are explicitly passed to recipe and network-diagnostic
+workflow calls, never standalone builds. Untrusted source checkouts must not
+persist credentials.

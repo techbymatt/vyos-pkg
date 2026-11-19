@@ -15,7 +15,7 @@ jobs:
     outputs:
       changed: ${{ steps.plan.outputs.changed }}
       image: ${{ steps.image.outputs.image }}
-      patch-commit: ${{ steps.plan.outputs.patch-commit }}
+      patch-commit: ${{ steps.plan.outputs.patch-commit || steps.checkout.outputs.commit }}
       build-extra-matrix: ${{ steps.plan.outputs.build-extra-matrix }}
       build-matrix: ${{ steps.plan.outputs.build-matrix }}
       restore-matrix: ${{ steps.plan.outputs.restore-matrix }}
@@ -81,6 +81,22 @@ jobs:
           path: workflow/input-manifest.json
           if-no-files-found: error
     timeout-minutes: 30
+  probe-network:
+    # Diagnostics are independent of the build/Verify/Publish dependency chain.
+    if: ${{ !cancelled() && github.repository == 'techbymatt/vyos-pkg' && (needs.cache-check.outputs.changed == 'true' || needs.cache-check.result == 'failure') }}
+    name: Network diagnostics
+    needs: [cache-check]
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    uses: ./.github/workflows/probe-build-network.yaml
+    with:
+      image: ${{ needs.cache-check.outputs.image || 'ghcr.io/techbymatt/vyos-build:rolling' }}
+      build-ref: ${{ needs.cache-check.outputs.patch-commit }}
+    secrets:
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
   build:
     if: ${{ github.repository == 'techbymatt/vyos-pkg' && fromJSON(needs.cache-check.outputs.build-matrix || '{"include":[]}').include[0] != null }}
     name: Build

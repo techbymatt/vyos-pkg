@@ -3,6 +3,30 @@
 name: Probe build network
 on:
   workflow_dispatch:
+    inputs:
+      image:
+        description: Multi-architecture build image to probe from (prefer a digest).
+        default: ghcr.io/techbymatt/vyos-build:rolling
+        type: string
+      build-ref:
+        description: Patch repository revision; empty uses its default branch.
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      image:
+        description: The caller's resolved multi-architecture build image.
+        required: true
+        type: string
+      build-ref:
+        description: Patch repository revision; empty uses its default branch.
+        default: ""
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
   # Allow testing this workflow in a PR before it can be dispatched.
   pull_request:
     paths:
@@ -45,6 +69,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: techbymatt/tbm-vyos-patch
+          ref: ${{ inputs.build-ref }}
           path: patch
           fetch-depth: 0
           submodules: recursive
@@ -69,8 +94,8 @@ jobs:
           - arch: arm64
             runner: ubuntu-26.04-arm
     container:
-      # Pin the multi-arch image and match the container networking options from run 44421843966.
-      image: ghcr.io/techbymatt/vyos-build@sha256:876781f24a30e68d56c9b6bfeada2034529fd11f92964aef3b780f891944cdba
+      # Publication passes its resolved image; PR probes use the rolling image.
+      image: ${{ inputs.image || 'ghcr.io/techbymatt/vyos-build:rolling' }}
       options: "--privileged --sysctl net.ipv6.conf.lo.disable_ipv6=0"
     permissions:
       contents: read
@@ -131,9 +156,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          jobs=$(timeout 20s gh api \
+          # Called workflows prefix job names; publication can have over 100 jobs.
+          jobs=$(timeout 60s gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '.jobs[] | select(.name | startswith("Probe (")) | [.id, .name, .html_url] | @tsv')
+            --jq '.[] | .jobs[] | select(.name | test("(^| / )Probe \\((amd64|arm64)\\)$")) | [.id, .name, .html_url] | @tsv')
           {
             printf '%s\n\n' '### Build probe runner placement'
             printf '%s\n\n' 'Source: **Set up job → Runner Image Provisioner** in the probe job logs.'

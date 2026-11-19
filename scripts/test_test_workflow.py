@@ -1,5 +1,6 @@
 """Contracts shared by the manual and publication workflows (stdlib only)."""
 
+import json
 import os
 import re
 import subprocess
@@ -218,18 +219,76 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertNotIn("PATCH_TOKEN", public)
         self.assertIn("PATCH_TOKEN: ${{ steps.app-token.outputs.token }}", private)
 
+    def test_build_probe_accepts_caller_inputs_and_named_secrets(self):
+        """Publish can pin the probe while manual and PR entry points remain usable."""
+        workflow = (WORKFLOWS / "probe-build-network.yaml").read_text()
+        self.assertIn("  workflow_dispatch:", workflow)
+        self.assertIn("  pull_request:", workflow)
+        call = workflow.split("  workflow_call:\n", 1)[1].split("  #", 1)[0]
+        self.assertIn("      image:", call)
+        self.assertIn("      build-ref:", call)
+        self.assertIn(
+            "    secrets:\n      APP_CLIENT_ID:\n        required: true", call
+        )
+        self.assertIn("      APP_PRIVATE_KEY:\n        required: true", call)
+        self.assertIn("ref: ${{ inputs.build-ref }}", job_text(workflow, "inventory"))
+        probe = job_text(workflow, "probe")
+        self.assertIn(
+            "image: ${{ inputs.image || 'ghcr.io/techbymatt/vyos-build:rolling' }}",
+            probe,
+        )
+
+    def test_publish_calls_one_non_gating_network_probe(self):
+        """Diagnostics skip no-op runs but still run after a failed cache check."""
+        workflow = (WORKFLOWS / "publish.yaml").read_text()
+        probe = job_text(workflow, "probe-network")
+        uses = "uses: ./.github/workflows/probe-build-network.yaml"
+        self.assertEqual(workflow.count(uses), 1)
+        self.assertIn(uses, probe)
+        self.assertIn("needs: [cache-check]", probe)
+        self.assertIn("if: ${{ !cancelled()", probe)
+        self.assertIn("needs.cache-check.outputs.changed == 'true'", probe)
+        self.assertIn("needs.cache-check.result == 'failure'", probe)
+        self.assertIn("build-ref: ${{ needs.cache-check.outputs.patch-commit }}", probe)
+        self.assertIn(
+            "image: ${{ needs.cache-check.outputs.image || 'ghcr.io/techbymatt/vyos-build:rolling' }}",
+            probe,
+        )
+        for permission in ("actions", "contents", "packages"):
+            self.assertIn(f"{permission}: read", probe)
+        for secret in ("APP_CLIENT_ID", "APP_PRIVATE_KEY"):
+            self.assertIn(f"{secret}: ${{{{ secrets.{secret} }}}}", probe)
+        self.assertNotIn("secrets: inherit", probe)
+        self.assertNotIn("steps:", probe)
+        cache = job_text(workflow, "cache-check")
+        self.assertIn(
+            "patch-commit: ${{ steps.plan.outputs.patch-commit || steps.checkout.outputs.commit }}",
+            cache,
+        )
+        for job in ("build", "build-extra", "restore-cached", "verify", "publish"):
+            with self.subTest(job=job):
+                self.assertNotIn("probe-network", job_text(workflow, job))
+
     def test_build_probe_reports_placement_from_the_probe_attempt(self):
-        """Only the setup log establishes cloud/region; missing logs stay unknown."""
+        """Pagination and prefixed names work; only setup logs establish placement."""
         workflow = (WORKFLOWS / "probe-build-network.yaml").read_text()
         script = textwrap.dedent(
             job_text(workflow, "placement").split("run: |\n", 1)[1]
         )
+        self.assertIn("gh api --paginate --slurp", script)
+        query = re.search(r"--jq '([^']+)'", script)[1]
+        self.assertIn(".[] | .jobs[]", query)
+        name_filter = json.loads(re.search(r'test\((".*?")\)', query)[1])
+        for name in ("Probe (amd64)", "Network diagnostics / Probe (arm64)"):
+            self.assertRegex(name, name_filter)
+        for name in ("Build (amd64)", "Probe (arm64) / unrelated", "Not Probe (amd64)"):
+            self.assertNotRegex(name, name_filter)
         fixture = r"""timeout() { shift; "$@"; }
 gh() {
   case "$*" in
     *'/runs/42/attempts/2/jobs?per_page=100'*)
-      printf '%s\n' $'11\tProbe (amd64)\thttps://example.org/jobs/11'
-      printf '%s\n' $'12\tProbe (arm64)\thttps://example.org/jobs/12' ;;
+      printf '11\t%sProbe (amd64)\thttps://example.org/jobs/11\n' "$PROBE_JOB_PREFIX"
+      printf '12\t%sProbe (arm64)\thttps://example.org/jobs/12\n' "$PROBE_JOB_PREFIX" ;;
     *'/jobs/11/logs')
       printf '2026-11-19T00:00:00Z %s\r\n' \
         '##[group]Runner Image Provisioner' 'Region: us-east-1' 'Cloud: AWS' \
@@ -240,28 +299,32 @@ gh() {
 }
 """
         with tempfile.TemporaryDirectory() as temporary:
-            summary = Path(temporary) / "summary"
-            subprocess.run(
-                ["bash", "-e", "-o", "pipefail", "-c", fixture + script],
-                env={
-                    **os.environ,
-                    "GITHUB_REPOSITORY": "example/repo",
-                    "GITHUB_RUN_ID": "42",
-                    "GITHUB_RUN_ATTEMPT": "2",
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                },
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            report = summary.read_text()
-        self.assertIn(
-            "| [Probe (amd64)](https://example.org/jobs/11) | AWS | us-east-1 |", report
-        )
-        self.assertIn(
-            "| [Probe (arm64)](https://example.org/jobs/12) | unavailable | unavailable |",
-            report,
-        )
+            for index, prefix in enumerate(("", "Network diagnostics / ")):
+                with self.subTest(prefix=prefix):
+                    summary = Path(temporary) / f"summary-{index}"
+                    subprocess.run(
+                        ["bash", "-e", "-o", "pipefail", "-c", fixture + script],
+                        env={
+                            **os.environ,
+                            "GITHUB_REPOSITORY": "example/repo",
+                            "GITHUB_RUN_ID": "42",
+                            "GITHUB_RUN_ATTEMPT": "2",
+                            "GITHUB_STEP_SUMMARY": str(summary),
+                            "PROBE_JOB_PREFIX": prefix,
+                        },
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    report = summary.read_text()
+                    self.assertIn(
+                        f"| [{prefix}Probe (amd64)](https://example.org/jobs/11) | AWS | us-east-1 |",
+                        report,
+                    )
+                    self.assertIn(
+                        f"| [{prefix}Probe (arm64)](https://example.org/jobs/12) | unavailable | unavailable |",
+                        report,
+                    )
 
     def test_shared_output_policy_precedes_both_uploads(self):
         """Artifact uploads run after the output policy check."""
@@ -469,6 +532,7 @@ gh() {
         workflow = (WORKFLOWS / "publish.yaml").read_text()
         for job in (
             "cache-check",
+            "probe-network",
             "build",
             "build-extra",
             "restore-cached",
