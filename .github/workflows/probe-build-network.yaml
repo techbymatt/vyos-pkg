@@ -6,7 +6,7 @@ on:
   # Allow testing this workflow in a PR before it can be dispatched.
   pull_request:
     paths:
-      - .github/workflows/probe-kernel-wkd.yaml
+      - .github/workflows/probe-build-network.yaml
       - scripts/build_probe_resources.json
       - scripts/build_probe_targets.py
       - scripts/probe_build_network.sh

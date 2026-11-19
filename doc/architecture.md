@@ -119,7 +119,7 @@ arm64 and delete them afterward.
 
 ### Build network diagnostics
 
-**Probe build network** (`probe-kernel-wkd.yaml`) compares direct IPv4 and IPv6
+**Probe build network** (`probe-build-network.yaml`) compares direct IPv4 and IPv6
 from the native build containers. It also runs on same-repository pull requests
 that change the probe. The inventory reads the patch repository's pinned,
 patched recipes and submodule URLs, plus the catalog's standalone repos. It does

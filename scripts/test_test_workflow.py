@@ -199,7 +199,7 @@ class TestWorkflowTests(unittest.TestCase):
 
     def test_build_probe_keeps_inventory_and_checkout_credentials_scoped(self):
         """Only the owner can read the patch repo; a checkout failure does not skip probing."""
-        workflow = (WORKFLOWS / "probe-kernel-wkd.yaml").read_text()
+        workflow = (WORKFLOWS / "probe-build-network.yaml").read_text()
         inventory = job_text(workflow, "inventory")
         probe = job_text(workflow, "probe")
         for job in (inventory, probe):
@@ -218,9 +218,9 @@ class TestWorkflowTests(unittest.TestCase):
         self.assertNotIn("PATCH_TOKEN", public)
         self.assertIn("PATCH_TOKEN: ${{ steps.app-token.outputs.token }}", private)
 
-    def test_wkd_probe_reports_placement_from_the_probe_attempt(self):
+    def test_build_probe_reports_placement_from_the_probe_attempt(self):
         """Only the setup log establishes cloud/region; missing logs stay unknown."""
-        workflow = (WORKFLOWS / "probe-kernel-wkd.yaml").read_text()
+        workflow = (WORKFLOWS / "probe-build-network.yaml").read_text()
         script = textwrap.dedent(
             job_text(workflow, "placement").split("run: |\n", 1)[1]
         )
