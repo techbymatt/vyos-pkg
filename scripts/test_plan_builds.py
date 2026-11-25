@@ -590,6 +590,10 @@ class PublishBoundaryTests(unittest.TestCase):
             )
         }
 
+    def git_stub(self, root, *arguments, **kwargs):
+        """Dispatch planner.git through the command stub."""
+        return self.output(["git", *arguments], cwd=root)
+
     def output(self, command, cwd=None):
         """Record and stub git, gh, and curl command outputs."""
         self.calls.append((command, cwd))
@@ -614,6 +618,7 @@ class PublishBoundaryTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             patch.object(planner, "command_output", side_effect=self.output),
+            patch.object(planner, "git", side_effect=self.git_stub),
             patch.object(
                 planner.package_sources, "resolve_sources", return_value=self.resolved
             ) as resolution,
@@ -798,6 +803,7 @@ class PublishBoundaryTests(unittest.TestCase):
         """Source lookup failures stop publication, not trigger mass cache misses."""
         with (
             patch.object(planner, "command_output", side_effect=self.output),
+            patch.object(planner, "git", side_effect=self.git_stub),
             patch.object(
                 planner.package_sources,
                 "resolve_sources",
@@ -886,6 +892,7 @@ class PublishBoundaryTests(unittest.TestCase):
             )
         with (
             patch.object(planner, "command_output", side_effect=self.output),
+            patch.object(planner, "git", side_effect=self.git_stub),
             patch.object(
                 planner.package_sources, "resolve_sources", return_value=self.resolved
             ),

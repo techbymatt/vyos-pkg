@@ -9,6 +9,7 @@ readonly ARTIFACT_LIST="${REPO_DIR}/.artifacts"
 readonly GPG_KEY_ID="${GPG_FINGERPRINT:-${GPG_KEY_ID:-}}"
 readonly REPO_OWNER="${REPO_OWNER:-${ORIGIN:-}}"
 readonly ARCHITECTURES=(all amd64 arm64)
+RELEASE_TMP=""
 
 error() {
 	printf 'ERROR: %s\n' "$*" >&2
@@ -93,7 +94,9 @@ generate_indexes() {
 }
 
 generate_release() {
-	local release_date hash_spec hash_name hash_cmd filepath file_hash file_size
+	local release_date filepath file_hash file_size
+	RELEASE_TMP=$(mktemp -d) || error "Cannot create Release scratch directory"
+	touch "$RELEASE_TMP/md5" "$RELEASE_TMP/sha1" "$RELEASE_TMP/sha256" || error "Cannot create Release scratch files"
 	release_date=$(date -Ru)
 	{
 		printf 'Origin: VyOS\nLabel: %s\n' "$REPO_OWNER"
@@ -102,16 +105,29 @@ generate_release() {
 		printf 'Description: A repository for packages released by %s\n' "$REPO_OWNER"
 		printf 'Date: %s\n' "$release_date"
 	} >Release
-	for hash_spec in MD5Sum:md5sum SHA1:sha1sum SHA256:sha256sum; do
-		hash_name="${hash_spec%%:*}"
-		hash_cmd="${hash_spec##*:}"
-		printf '%s:\n' "$hash_name" >>Release
-		find main -type f -not -path '*/\.*' | sort | while IFS= read -r filepath; do
-			file_hash=$("$hash_cmd" "$filepath")
-			file_size=$(wc -c <"$filepath")
-			printf ' %s %s %s\n' "${file_hash%% *}" "${file_size//[[:space:]]/}" "$filepath" >>Release
-		done
-	done
+	# One sorted traversal; every file's size and all three digests are computed
+	# exactly once. Section order matches the previous three-pass implementation.
+	find main -type f -not -path '*/\.*' | sort >"$RELEASE_TMP/files" || error "Release file traversal failed"
+	while IFS= read -r filepath; do
+		file_size=$(wc -c <"$filepath")
+		file_size="${file_size//[[:space:]]/}"
+		file_hash=$(md5sum "$filepath")
+		printf ' %s %s %s\n' "${file_hash%% *}" "$file_size" "$filepath" >>"$RELEASE_TMP/md5"
+		file_hash=$(sha1sum "$filepath")
+		printf ' %s %s %s\n' "${file_hash%% *}" "$file_size" "$filepath" >>"$RELEASE_TMP/sha1"
+		file_hash=$(sha256sum "$filepath")
+		printf ' %s %s %s\n' "${file_hash%% *}" "$file_size" "$filepath" >>"$RELEASE_TMP/sha256"
+	done <"$RELEASE_TMP/files"
+	{
+		printf 'MD5Sum:\n'
+		cat "$RELEASE_TMP/md5"
+		printf 'SHA1:\n'
+		cat "$RELEASE_TMP/sha1"
+		printf 'SHA256:\n'
+		cat "$RELEASE_TMP/sha256"
+	} >>Release
+	rm -rf "$RELEASE_TMP"
+	RELEASE_TMP=""
 }
 
 sign_release() {
@@ -125,6 +141,9 @@ sign_release() {
 
 cleanup() {
 	rm -f "$ARTIFACT_LIST"
+	if [[ -n "$RELEASE_TMP" ]]; then
+		rm -rf "$RELEASE_TMP"
+	fi
 	rm -rf "$SITE_DIR/packages"
 }
 

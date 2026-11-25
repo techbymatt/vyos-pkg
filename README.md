@@ -33,7 +33,7 @@ The scheduled publish workflow compares its recorded inputs with `input-manifest
 
 The manifest is deployed together with the repository, so a failed build or deployment cannot advance the published baseline. Runs are serialized to avoid overlapping publications. Publication planning is separate from compilation: workflow, site, signing-key, or build-image changes can republish restored packages without rebuilding their unchanged sources.
 
-Package caches are **source-specific**, keyed by build group, source package, architecture, and a fingerprint calculated by `scripts/package_sources.py`:
+Package caches are **source-specific**, keyed by build group, source package, architecture, and a fingerprint calculated by `scripts/source_identity.py`:
 
 - Recipe packages track the complete `vyos-build/scripts/package-build/<name>/` tree after applying the downstream patches, plus the resolved commits of every Git repository the recipe builds. The `vyos-build` revision remains the one pinned by `techbymatt/tbm-vyos-patch`.
 - Nested source clones are tracked too: for example, FRR builds both libyang and FRR, Kea also clones its packaging repository, and the kernel's accel-PPP build consumes both VPP and `vyos-vpp-patches` from the sibling VPP recipe.
@@ -127,7 +127,7 @@ Use the existing net-snmp, FRR/libyang, and strongSwan adaptations as examples. 
 
 Build-mode and pinning edits are staged through `scripts/checked_edits.py`. All command anchors, including nested builders, are validated before files change, so upstream drift cannot leave a partially adapted builder. Executable bits and shared-builder symlinks are preserved. Optional upstream tests enumerate registered build adaptations automatically.
 
-Audit source discovery as well as compilation. Repositories declared with `scm_url`/`commit_id` in `package.toml` are tracked automatically. If a custom builder or nested hook clones another repository, add audited discovery and pinning support in `scripts/package_sources.py`; Kea's packaging clone is an example. Add any out-of-folder source/configuration inputs only to the consuming recipe's descriptor. Source pinning also uses checked replacements and fails on upstream command drift.
+Audit source discovery as well as compilation. Repositories declared with `scm_url`/`commit_id` in `package.toml` are tracked automatically. If a custom builder or nested hook clones another repository, add audited discovery support in `scripts/recipe_inputs.py` and pinning support in `scripts/source_pinning.py`; Kea's packaging clone is an example. Add any out-of-folder source/configuration inputs only to the consuming recipe's descriptor. Source pinning also uses checked replacements and fails on upstream command drift.
 
 ### 4. Validate and enable publication
 
@@ -146,7 +146,7 @@ The Test workflow accepts package names directly, including sources not yet in t
 
 - `scripts/package_catalog.py` validates definitions and exposes immutable runtime source settings. Its CLI safely scaffolds entries and shows their effective configuration.
 - `scripts/build_matrix.py` owns input normalization, catalog expansion, priority scheduling, cache routing, restore batching, and verification plans. `scripts/plan_builds.py` handles Git/GitHub/Pages boundaries and emits job outputs directly; there is no intermediate TSV or jq matrix filter.
-- `scripts/source_identity.py` owns canonical source descriptors and fingerprints. `scripts/package_sources.py` discovers scoped inputs, resolves Git refs, and pins checkouts. `scripts/legacy_package_cache.py` proves old cache inputs during migration; `scripts/package_cache.py` indexes visible source keys.
+- `scripts/source_identity.py` owns canonical source descriptors and fingerprints. `scripts/recipe_inputs.py` discovers scoped inputs, `scripts/source_resolver.py` resolves Git refs, and `scripts/source_pinning.py` pins checkouts; `scripts/package_sources.py` is the compatibility facade and CLI. `scripts/legacy_package_cache.py` proves old cache inputs during migration; `scripts/package_cache.py` indexes visible source keys.
 - `build-recipe.yaml` and `build-standalone.yaml` own execution for both Publish and Test. Publish supplies pinned revisions and enables caching; Test disables caching. Cache hits skip patching, preparation, toolchain setup, and compilation. Both callers select concurrency explicitly.
 - The `package-paths` and `package-artifacts` actions share `scripts/package_layout.py`'s ordered cache/upload paths with `restore-package`. The compression action is shared too, and restore cleanup removes only validated output files, never source directories or external symlink targets.
 - `verify-packages.yaml` validates unmerged artifacts together, using the planned producer/architecture sets. Lintian produces one advisory report for the run; incomplete scans fail verification.

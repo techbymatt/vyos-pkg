@@ -27,11 +27,11 @@ from typing import BinaryIO
 try:
     from .package_catalog import ARCHITECTURES
     from .package_layout import artifact_arch
-    from .workflow_utils import positive_int
+    from .workflow_utils import cli_error, positive_int
 except ImportError:
     from package_catalog import ARCHITECTURES
     from package_layout import artifact_arch
-    from workflow_utils import positive_int
+    from workflow_utils import cli_error, positive_int
 
 FIELDS = ("Package", "Version", "Architecture", "Maintainer", "Description")
 
@@ -317,8 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             validate_packages(args.packages, args.arch, jobs=args.jobs)
     except ValueError as error:
-        print(f"validate_packages: {error}", file=sys.stderr)
-        return 1
+        return cli_error("validate_packages", error)
     return 0
 
 

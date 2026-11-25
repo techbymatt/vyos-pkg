@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 try:
-    from . import source_identity as package_sources
-    from .workflow_utils import atomic_write, canonical_json
+    from . import source_identity
+    from .workflow_utils import atomic_write, canonical_json, cli_error
 except ImportError:
-    import source_identity as package_sources
-    from workflow_utils import atomic_write, canonical_json
+    import source_identity
+    from workflow_utils import atomic_write, canonical_json, cli_error
 
 
 class Package(TypedDict):
@@ -115,11 +115,11 @@ def validate_manifest(value: object) -> Manifest:
         )
         if schema == 2:
             try:
-                source = package_sources.validate_source(entry["source"])
+                source = source_identity.validate_source(entry["source"])
             except TypeError as error:
                 raise ValueError("invalid package source") from error
             digest = require_pattern(entry["source_digest"], HEX256, "source digest")
-            if digest != package_sources.fingerprint(source):
+            if digest != source_identity.fingerprint(source):
                 raise ValueError("source digest does not match its inputs")
             if (source["recipe_tree"] is None) != (group == "build-extra"):
                 raise ValueError("source recipe tree does not match the build group")
@@ -218,8 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             published = load_manifest(args.published)
             return int(canonical_bytes(current) != canonical_bytes(published))
     except (OSError, ValueError, UnicodeError, RecursionError) as error:
-        print(f"publish_manifest: {error}", file=sys.stderr)
-        return 2
+        return cli_error("publish_manifest", error, code=2)
     return 0
 
 

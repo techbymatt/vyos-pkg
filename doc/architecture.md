@@ -49,7 +49,10 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/build_matrix.py` | Deterministic native matrices, execution settings, build priorities, restore batches and complete producer plans. |
 | `scripts/plan_builds.py` | Git/GitHub/Pages boundaries, manifest comparison, diagnostics and `GITHUB_OUTPUT`. |
 | `scripts/source_identity.py` | Pure descriptor validation and canonical source hashing. No cloning/build policy. |
-| `scripts/package_sources.py` | Patched/historical recipe readers, bounded Git resolution, checked source pinning and its CLI. |
+| `scripts/recipe_inputs.py` | Patched/historical recipe readers and scoped source discovery; no network access. |
+| `scripts/source_resolver.py` | Bounded Git ref resolution: one ls-remote snapshot per URL, commit-API expansion for abbreviated hashes, concurrency-limited. |
+| `scripts/source_pinning.py` | Audited checkouts and pins applied to planned full commits without changing version labels. |
+| `scripts/package_sources.py` | Compatibility facade and CLI (`pin`, `retry-clones`, `checkout`); re-exports the historical API for upstream builders. |
 | `scripts/network_retry.py` | Shared bounded backoff with tool-specific transient error checks. |
 | `scripts/git_network.py` | Scoped Git transport timeouts and retries; clean staging for clone attempts. |
 | `scripts/kernel_keys.py` | Retry lookup of the kernel recipe's public signing keys. |
@@ -61,13 +64,15 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/package_layout.py` | Artifact names, ordered paths, composite-action output encoding and file-only cleanup. |
 | `scripts/validate_packages.py` | Static metadata/archive/checksum validation and global binary-identity checks. |
 | `scripts/report_lintian.py` | Bounded parallel scans, process-group cleanup, ordered reporting and completeness status. |
-| `scripts/workflow_utils.py` | Canonical JSON, bounded noninteractive commands, atomic writes and safe job-output encoding. |
-| `scripts/build_repo.sh` | Assemble/sign the repository only after Jekyll and successful Verify. |
+| `scripts/workflow_utils.py` | Canonical JSON, bounded noninteractive commands, atomic writes, safe job-output encoding and the shared CLI error boundary. |
+| `scripts/build_repo.sh` | Assemble/sign the repository only after Jekyll and successful Verify. Release entries hash each file's size and digests in one sorted traversal. |
 
 The existing command entry points remain usable directly or through `python3 -m
-scripts.<module>`. `package_sources.py` retains the checkout helper imported by
-adapted upstream builders; do not break that import when moving implementation
-code. Manifests continue to use schema v2 and remain able to read v1 proofs.
+scripts.<module>`. `package_sources.py` is the compatibility facade: the
+implementation lives in `recipe_inputs.py`, `source_resolver.py` and
+`source_pinning.py`. It retains the checkout helper imported by adapted upstream
+builders (`from package_sources import checkout_source`); do not break that
+import. Manifests continue to use schema v2 and remain able to read v1 proofs.
 
 ## Adding a standard source
 
@@ -107,7 +112,8 @@ use `RECIPE_HOOKS` or `EXTRA_HOOKS`, with edits staged through `CheckedEdits`.
 The optional preparation audits enumerate the registry rather than maintain a
 second package list.
 
-Nested clones require both **discovery and pinning** in `package_sources.py`.
+Nested clones require both **discovery** (`recipe_inputs.py`) and **pinning**
+(`source_pinning.py`).
 Declared `scm_url`/`commit_id` repositories are automatic; shell/custom clones
 are not. Audit their exact commands and fail on drift. Scope external files only
 to their consumer. The kernel's VPP recipe/repos and certificates/defaults, Kea's

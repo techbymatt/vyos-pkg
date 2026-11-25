@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 try:
+    from .workflow_utils import cli_error
     from .package_catalog import (
         ARCHITECTURES,
         GROUPS,
@@ -20,6 +21,7 @@ try:
         find_source,
     )
 except ImportError:
+    from workflow_utils import cli_error
     from package_catalog import (
         ARCHITECTURES,
         GROUPS,
@@ -71,8 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             check_outputs(args.group, args.package, args.arch, args.directory)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        print(f"package_build_policy: {error}", file=sys.stderr)
-        return 1
+        return cli_error("package_build_policy", error)
     return 0
 
 

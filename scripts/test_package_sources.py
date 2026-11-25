@@ -18,11 +18,13 @@ try:
     from . import git_network, network_retry
     from . import package_sources as sources
     from . import prepare_package_build as build_policy
+    from . import source_resolver as resolver_module
 except ImportError:
     import git_network
     import network_retry
     import package_sources as sources
     import prepare_package_build as build_policy
+    import source_resolver as resolver_module
 
 COMMIT = "a" * 40
 OTHER_COMMIT = "b" * 40
@@ -557,8 +559,8 @@ class GitResolutionTests(unittest.TestCase):
     def test_github_short_commit_resolution_and_memoization(self):
         """GitHub abbreviated commits use its commit API once per ref."""
         with (
-            patch.object(sources, "remote_git", return_value="") as remote,
-            patch.object(sources, "command_output", return_value=COMMIT) as output,
+            patch.object(resolver_module, "remote_git", return_value="") as remote,
+            patch.object(resolver_module, "command_output", return_value=COMMIT) as output,
         ):
             self.assertEqual(self.resolver.resolve(URL, "a" * 8), COMMIT)
             self.assertEqual(self.resolver.resolve(URL, "a" * 8), COMMIT)
@@ -589,7 +591,7 @@ class GitResolutionTests(unittest.TestCase):
             for url in urls
             for ref in ("rolling", "v1", "rolling")
         ]
-        with patch.object(sources, "remote_git", side_effect=lookup) as output:
+        with patch.object(resolver_module, "remote_git", side_effect=lookup) as output:
             resolved = self.resolver.resolve_many(requested, jobs=3)
         self.assertEqual(output.call_count, 3)
         self.assertEqual(
@@ -619,7 +621,7 @@ class GitResolutionTests(unittest.TestCase):
                 active -= 1
             return f"{COMMIT}\trefs/heads/rolling"
 
-        with patch.object(sources, "remote_git", side_effect=lookup):
+        with patch.object(resolver_module, "remote_git", side_effect=lookup):
             resolved = self.resolver.resolve_many(
                 [
                     {"url": f"https://example.org/{index}.git", "ref": "rolling"}
@@ -642,9 +644,9 @@ class GitResolutionTests(unittest.TestCase):
             barrier.wait(timeout=5)
 
         with (
-            patch.object(sources, "remote_git", return_value=""),
-            patch.object(sources, "clone_repository", side_effect=clone),
-            patch.object(sources, "git", return_value=COMMIT),
+            patch.object(resolver_module, "remote_git", return_value=""),
+            patch.object(resolver_module, "clone_repository", side_effect=clone),
+            patch.object(resolver_module, "git", return_value=COMMIT),
         ):
             self.resolver.resolve_many(
                 [
@@ -660,7 +662,7 @@ class GitResolutionTests(unittest.TestCase):
         """A metadata lookup failure propagates instead of inventing source revisions."""
         with (
             patch.object(
-                sources, "remote_git", side_effect=ValueError("lookup failed")
+                resolver_module, "remote_git", side_effect=ValueError("lookup failed")
             ),
             self.assertRaisesRegex(ValueError, "lookup failed"),
         ):
@@ -701,9 +703,9 @@ class GitResolutionTests(unittest.TestCase):
         """Public GitLab commit lookup avoids cloning packaging histories."""
         url = "https://salsa.debian.org/debian/pkg.git"
         with (
-            patch.object(sources, "remote_git", return_value="") as remote,
+            patch.object(resolver_module, "remote_git", return_value="") as remote,
             patch.object(
-                sources, "command_output", return_value=json.dumps({"id": COMMIT})
+                resolver_module, "command_output", return_value=json.dumps({"id": COMMIT})
             ) as output,
         ):
             self.assertEqual(self.resolver.resolve(url, "a" * 8), COMMIT)
@@ -734,7 +736,7 @@ class GitResolutionTests(unittest.TestCase):
     def test_evidence_commit_expansion_must_preserve_the_recorded_hash_prefix(self):
         """An API resolving a hash-like ref name cannot substitute for a checkout ID."""
         with (
-            patch.object(sources, "command_output", return_value=COMMIT),
+            patch.object(resolver_module, "command_output", return_value=COMMIT),
             self.assertRaisesRegex(ValueError, "source revision changed"),
         ):
             self.resolver.resolve_evidence(URL, "bbbbbbbb", COMMIT)
@@ -745,9 +747,9 @@ class GitResolutionTests(unittest.TestCase):
         """Unknown-host abbreviated logs need existing metadata or a full ID."""
         url = "https://git.kernel.org/firmware.git"
         with (
-            patch.object(sources, "command_output") as output,
-            patch.object(sources, "remote_git") as remote,
-            patch.object(sources, "clone_repository") as clone,
+            patch.object(resolver_module, "command_output") as output,
+            patch.object(resolver_module, "remote_git") as remote,
+            patch.object(resolver_module, "clone_repository") as clone,
         ):
             with self.assertRaisesRegex(ValueError, "unverifiable abbreviated"):
                 self.resolver.resolve_evidence(url, COMMIT[:8], COMMIT)

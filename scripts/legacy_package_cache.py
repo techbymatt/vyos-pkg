@@ -18,13 +18,19 @@ from datetime import datetime
 from pathlib import PurePosixPath
 
 try:
-    from . import package_sources as sources
     from . import publish_manifest as manifest
     from .package_cache import CacheIndex
+    from .recipe_inputs import RecipeReader
+    from .source_identity import REVISION, fingerprint
+    from .source_resolver import Resolver
+    from .workflow_utils import command_output
 except ImportError:
-    import package_sources as sources
     import publish_manifest as manifest
     from package_cache import CacheIndex
+    from recipe_inputs import RecipeReader
+    from source_identity import REVISION, fingerprint
+    from source_resolver import Resolver
+    from workflow_utils import command_output
 
 LEGACY_KEY = re.compile(
     r"^cache-v2-(?P<package>[a-z0-9][a-z0-9_+.-]*)-(?P<arch>amd64|arm64)-"
@@ -108,7 +114,7 @@ def checkout_evidence(
             active = directories.get(PurePosixPath(clone[1]).name)
         checkout = re.match(r"HEAD is now at ([0-9a-f]{7,64})\b", text)
         if checkout is None:
-            checkout = re.match(rf"Note: switching to '({sources.REVISION})'", text)
+            checkout = re.match(rf"Note: switching to '({REVISION})'", text)
         if active and checkout:
             previous = commits.get(active)
             if previous is not None and not (
@@ -126,7 +132,7 @@ class LegacyVerifier:
     """Memoized, time-bounded proof lookup for visible legacy cache entries."""
 
     def __init__(
-        self, repository: str, reader: sources.RecipeReader, resolver: sources.Resolver
+        self, repository: str, reader: RecipeReader, resolver: Resolver
     ):
         """Share source metadata lookups with the current publication planner."""
         self.repository = repository
@@ -144,7 +150,7 @@ class LegacyVerifier:
         if paginate:
             command.extend(("--paginate", "--slurp"))
         command.append(f"repos/{self.repository}/{endpoint}")
-        return json.loads(sources.command_output(command, timeout=60))
+        return json.loads(command_output(command, timeout=60))
 
     def producer_manifest(self, run: str) -> dict:
         """Load the producer's candidate inputs once, regardless of deployment."""
@@ -199,7 +205,7 @@ class LegacyVerifier:
         identifier = job["id"]
         if identifier not in self.evidence:
             self.evidence[identifier] = None
-            log = sources.command_output(
+            log = command_output(
                 [
                     "gh",
                     "api",
@@ -239,57 +245,9 @@ class LegacyVerifier:
             old = rows[0]
             job = self.producer_job(parsed["run"], parsed["attempt"], old)
             if record["group"] == "build-extra":
-                if old["commit"] != record["commit"]:
-                    raise ValueError("standalone source revision changed")
+                self._verify_standalone(record, old)
             else:
-                source = self.reader.recipe(record["package"], producer["patch_commit"])
-                if (
-                    self.reader.legacy_revision(
-                        record["package"], producer["patch_commit"]
-                    )
-                    != old["commit"]
-                ):
-                    raise ValueError(
-                        "historical recipe revision does not match producer inputs"
-                    )
-                current = record["source"]
-                if (source["recipe_tree"], source["inputs"]) != (
-                    current["recipe_tree"],
-                    current["inputs"],
-                ):
-                    raise ValueError("patched recipe or scoped source inputs changed")
-                evidence = self.producer_evidence(
-                    job, record["package"], source["repositories"]
-                )
-                if evidence["patch_commit"] != producer["patch_commit"]:
-                    raise ValueError("producer checked out different patch inputs")
-                for entry in source["repositories"]:
-                    abbreviated = evidence["commits"].get(entry["name"])
-                    if abbreviated is None:
-                        raise ValueError(
-                            f"producer did not record the {entry['name']} checkout"
-                        )
-                    expected = [
-                        item["commit"]
-                        for item in current["repositories"]
-                        if (item["name"], item["url"], item["ref"])
-                        == (entry["name"], entry["url"], entry["ref"])
-                    ]
-                    if len(expected) != 1:
-                        raise ValueError("recipe-cloned repositories changed")
-                    if re.fullmatch(sources.REVISION, entry["ref"].lower()):
-                        actual = entry["ref"].lower()
-                        if not actual.startswith(abbreviated):
-                            raise ValueError(
-                                "producer checkout does not match its pinned commit"
-                            )
-                    else:
-                        actual = self.resolver.resolve_evidence(
-                            entry["url"], abbreviated, expected[0]
-                        )
-                    entry["commit"] = actual
-                if sources.fingerprint(source) != record["source_digest"]:
-                    raise ValueError("recipe-cloned source revisions changed")
+                self._verify_recipe(record, old, producer, job)
             self.reasons[identity] = "legacy source inputs verified"
             return True
         except subprocess.TimeoutExpired:
@@ -316,6 +274,64 @@ class LegacyVerifier:
         ) as error:
             self.reasons[identity] = str(error)
             return False
+
+    def _verify_standalone(self, record: dict, old: dict) -> None:
+        """Standalone (build-extra) proof: the pinned ref must still match."""
+        if old["commit"] != record["commit"]:
+            raise ValueError("standalone source revision changed")
+
+    def _verify_recipe(
+        self, record: dict, old: dict, producer: dict, job: dict
+    ) -> None:
+        """Recipe proof: patched tree and scoped source inputs must match."""
+        source = self.reader.recipe(record["package"], producer["patch_commit"])
+        if (
+            self.reader.legacy_revision(
+                record["package"], producer["patch_commit"]
+            )
+            != old["commit"]
+        ):
+            raise ValueError(
+                "historical recipe revision does not match producer inputs"
+            )
+        current = record["source"]
+        if (source["recipe_tree"], source["inputs"]) != (
+            current["recipe_tree"],
+            current["inputs"],
+        ):
+            raise ValueError("patched recipe or scoped source inputs changed")
+        evidence = self.producer_evidence(
+            job, record["package"], source["repositories"]
+        )
+        if evidence["patch_commit"] != producer["patch_commit"]:
+            raise ValueError("producer checked out different patch inputs")
+        for entry in source["repositories"]:
+            abbreviated = evidence["commits"].get(entry["name"])
+            if abbreviated is None:
+                raise ValueError(
+                    f"producer did not record the {entry['name']} checkout"
+                )
+            expected = [
+                item["commit"]
+                for item in current["repositories"]
+                if (item["name"], item["url"], item["ref"])
+                == (entry["name"], entry["url"], entry["ref"])
+            ]
+            if len(expected) != 1:
+                raise ValueError("recipe-cloned repositories changed")
+            if re.fullmatch(REVISION, entry["ref"].lower()):
+                actual = entry["ref"].lower()
+                if not actual.startswith(abbreviated):
+                    raise ValueError(
+                        "producer checkout does not match its pinned commit"
+                    )
+            else:
+                actual = self.resolver.resolve_evidence(
+                    entry["url"], abbreviated, expected[0]
+                )
+            entry["commit"] = actual
+        if fingerprint(source) != record["source_digest"]:
+            raise ValueError("recipe-cloned source revisions changed")
 
     def matches(self, records: list[dict], cached_keys: list[str]) -> dict:
         """Prefer source-key hits; otherwise select the newest proven legacy hit."""
