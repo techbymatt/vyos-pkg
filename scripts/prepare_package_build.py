@@ -32,6 +32,50 @@ class BinaryCommand:
     count: int = 1
 
 
+# The core Debian rules architecture-split repair shared by the
+# udp-broadcast-relay patch rewrite and the standalone vyatta-biosdevname
+# source repair. Each repair adds only its own trailing replacements and
+# target validation; the core anchors and rewrites are identical.
+RULES_CORE_REPLACEMENTS = (
+    (
+        "build: build-stamp\n",
+        "build: build-arch build-indep\n\nbuild-arch: build-stamp\n\nbuild-indep:\n",
+    ),
+    (
+        "# Build architecture-independent files here.\nbinary-indep: build install\n",
+        "# Build architecture-dependent files here.\nbinary-arch: build install\n",
+    ),
+    (
+        (
+            "# Build architecture-dependent files here.\nbinary-arch: build install\n"
+            "# This is an architecture independent package\n"
+            "# so; we have nothing to do by default.\n"
+        ),
+        "# No architecture-independent packages are produced.\nbinary-indep:\n",
+    ),
+)
+
+RULES_ARCH_TARGETS = ("build", "build-arch", "build-indep", "binary-arch", "binary-indep")
+
+
+def apply_rules_replacements(text: str, replacements: tuple, context: object) -> str:
+    """Apply audited rules replacements, requiring exactly one occurrence each."""
+    for old, _ in replacements:
+        if text.count(old) != 1:
+            raise ValueError(f"{context}: expected exactly one audited rules block {old!r}")
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text
+
+
+def validate_rules_targets(text: str, targets: tuple[str, ...], context: object) -> None:
+    """Require the audited debian/rules target layout before rewriting it."""
+    for target in targets:
+        expected = 0 if target in ("build-arch", "build-indep") else 1
+        if len(re.findall(rf"^{target}\s*:", text, re.MULTILINE)) != expected:
+            raise ValueError(f"{context}: unexpected {target} target layout")
+
+
 # A new overridden Debian build usually needs just one entry here, not another
 # branch in preparation or workflow YAML. More complex tools use the hook below.
 BINARY_COMMANDS = {
@@ -187,46 +231,18 @@ def stage_udp_packaging(
     if len(lines) != int(match[2]):
         raise ValueError(f"{path}: unexpected debian/rules hunk length")
     rules = "".join(line[1:] for line in lines)
-    for target in (
-        "build",
-        "build-arch",
-        "build-indep",
-        "binary",
-        "binary-arch",
-        "binary-indep",
-    ):
-        expected = 0 if target in ("build-arch", "build-indep") else 1
-        if len(re.findall(rf"^{target}\s*:", rules, re.MULTILINE)) != expected:
-            raise ValueError(f"{path}: unexpected {target} target layout")
+    validate_rules_targets(
+        rules, ("build", "build-arch", "build-indep", "binary", "binary-arch", "binary-indep"), path
+    )
     replacements = (
-        (
-            "build: build-stamp\n",
-            "build: build-arch build-indep\n\nbuild-arch: build-stamp\n\nbuild-indep:\n",
-        ),
-        (
-            "# Build architecture-independent files here.\nbinary-indep: build install\n",
-            "# Build architecture-dependent files here.\nbinary-arch: build install\n",
-        ),
-        (
-            (
-                "# Build architecture-dependent files here.\nbinary-arch: build install\n"
-                "# This is an architecture independent package\n# so; we have nothing to do by default.\n"
-            ),
-            "# No architecture-independent packages are produced.\nbinary-indep:\n",
-        ),
+        *RULES_CORE_REPLACEMENTS,
         ("binary: binary-indep\n", "binary: binary-arch binary-indep\n"),
         (
             ".PHONY: build clean binary-indep binary install\n",
             ".PHONY: build build-arch build-indep clean binary-arch binary-indep binary install\n",
         ),
     )
-    for old, _ in replacements:
-        if rules.count(old) != 1:
-            raise ValueError(
-                f"{path}: expected exactly one audited rules block {old!r}"
-            )
-    for old, new in replacements:
-        rules = rules.replace(old, new)
+    rules = apply_rules_replacements(rules, replacements, path)
     added = "".join("+" + line for line in rules.splitlines(keepends=True))
     hunk = f"{match[1]}@@ -0,0 +1,{len(rules.splitlines())} @@\n{added}"
     edits.set(path, text[: match.start()] + hunk + text[match.end() :])
@@ -267,40 +283,15 @@ def prepare_biosdevname(directory: Path) -> None:
     path = debian / "rules"
     text = path.read_text()
     replacements = (
-        (
-            "build: build-stamp\n",
-            "build: build-arch build-indep\n\nbuild-arch: build-stamp\n\nbuild-indep:\n",
-        ),
-        (
-            "# Build architecture-independent files here.\nbinary-indep: build install\n",
-            "# Build architecture-dependent files here.\nbinary-arch: build install\n",
-        ),
-        (
-            (
-                "# Build architecture-dependent files here.\n"
-                "binary-arch: build install\n"
-                "# This is an architecture independent package\n"
-                "# so; we have nothing to do by default.\n"
-            ),
-            "# No architecture-independent packages are produced.\nbinary-indep:\n",
-        ),
+        *RULES_CORE_REPLACEMENTS,
         (
             ".PHONY: build clean binary-indep binary-arch binary install",
             ".PHONY: build build-arch build-indep clean binary-indep binary-arch binary install",
         ),
     )
     # Unexpected extra targets must not silently combine with the added rules.
-    for target in ("build", "build-arch", "build-indep", "binary-arch", "binary-indep"):
-        expected = 0 if target in ("build-arch", "build-indep") else 1
-        if len(re.findall(rf"^{target}\s*:", text, re.MULTILINE)) != expected:
-            raise ValueError(f"{path}: unexpected {target} target layout")
-    for old, _ in replacements:
-        if text.count(old) != 1:
-            raise ValueError(
-                f"{path}: expected exactly one audited rules block {old!r}"
-            )
-    for old, new in replacements:
-        text = text.replace(old, new)
+    validate_rules_targets(text, RULES_ARCH_TARGETS, path)
+    text = apply_rules_replacements(text, replacements, path)
     edits = CheckedEdits()
     edits.set(path, text)
     edits.commit()
