@@ -16,8 +16,10 @@ from pathlib import Path
 
 try:
     from .package_catalog import ARCHITECTURES, GROUPS, SOURCE_PATTERN, validate_name
+    from .workflow_utils import cli_error
 except ImportError:
     from package_catalog import ARCHITECTURES, GROUPS, SOURCE_PATTERN, validate_name
+    from workflow_utils import cli_error
 
 ARTIFACT_PATTERN = re.compile(rf"deb-({SOURCE_PATTERN})-(amd64|arm64)")
 METADATA_SUFFIXES = (
@@ -123,8 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                 output.write(paths.output_text())
     except (OSError, ValueError, KeyError) as error:
-        print(f"package_layout: {error}", file=sys.stderr)
-        return 1
+        return cli_error("package_layout", error)
     return 0
 
 

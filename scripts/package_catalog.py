@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from .workflow_utils import atomic_write
+    from .workflow_utils import atomic_write, cli_error
 except ImportError:
-    from workflow_utils import atomic_write
+    from workflow_utils import atomic_write, cli_error
 
 CATALOG_PATH = Path(__file__).with_name("package_catalog.json")
 GROUPS = ("build", "build-extra")
@@ -240,8 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(sources)} sources, {sum(len(s.architectures) for s in sources)} native builds"
             )
     except (OSError, ValueError) as error:
-        print(f"package_catalog: {error}", file=sys.stderr)
-        return 1
+        return cli_error("package_catalog", error)
     return 0
 
 

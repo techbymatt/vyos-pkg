@@ -57,6 +57,7 @@ try:
         resolve_sources,
     )
     from .workflow_utils import canonical_json as canonical_bytes
+    from .workflow_utils import cli_error
     from .workflow_utils import command_output, git
 except ImportError:
     import package_catalog as catalog
@@ -98,6 +99,7 @@ except ImportError:
         resolve_sources,
     )
     from workflow_utils import canonical_json as canonical_bytes
+    from workflow_utils import cli_error
     from workflow_utils import command_output, git
 
 __all__ = [
@@ -175,8 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         KeyError,
         subprocess.SubprocessError,
     ) as error:
-        print(f"package_sources: {error}", file=sys.stderr)
-        return 1
+        return cli_error("package_sources", error)
     return 0
 
 

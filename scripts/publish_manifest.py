@@ -21,10 +21,10 @@ from typing import NotRequired, TypedDict
 
 try:
     from . import source_identity
-    from .workflow_utils import atomic_write, canonical_json
+    from .workflow_utils import atomic_write, canonical_json, cli_error
 except ImportError:
     import source_identity
-    from workflow_utils import atomic_write, canonical_json
+    from workflow_utils import atomic_write, canonical_json, cli_error
 
 
 class Package(TypedDict):
@@ -218,8 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             published = load_manifest(args.published)
             return int(canonical_bytes(current) != canonical_bytes(published))
     except (OSError, ValueError, UnicodeError, RecursionError) as error:
-        print(f"publish_manifest: {error}", file=sys.stderr)
-        return 2
+        return cli_error("publish_manifest", error, code=2)
     return 0
 
 

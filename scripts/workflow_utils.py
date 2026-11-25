@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -79,6 +80,12 @@ def output_lines(result: dict) -> Iterator[str]:
         if "\n" in encoded or "\r" in encoded:
             raise ValueError(f"output {name!r} would span multiple lines")
         yield f"{name}={encoded}"
+
+
+def cli_error(name: str, error: BaseException, code: int = 1) -> int:
+    """Print the standard CLI boundary message and return the exit code."""
+    print(f"{name}: {error}", file=sys.stderr)
+    return code
 
 
 def positive_int(value: str) -> int:

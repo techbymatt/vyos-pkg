@@ -14,11 +14,11 @@ from urllib.parse import urlsplit
 
 try:
     from . import package_catalog, package_sources
-    from .workflow_utils import command_output, output_lines
+    from .workflow_utils import cli_error, command_output, output_lines
 except ImportError:
     import package_catalog
     import package_sources
-    from workflow_utils import command_output, output_lines
+    from workflow_utils import cli_error, command_output, output_lines
 
 VYOS_BUILD = "https://github.com/vyos/vyos-build.git"
 VYOS_1X = "https://github.com/vyos/vyos-1x.git"
@@ -183,8 +183,7 @@ def main() -> int:
             print(f"{method}\t{label}\t{url}")
             seen.add((method, url))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"build_probe_targets: {error}", file=sys.stderr)
-        return 1
+        return cli_error("build_probe_targets", error)
     return 0
 
 

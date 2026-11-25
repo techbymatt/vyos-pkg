@@ -16,9 +16,11 @@ from pathlib import Path
 try:
     from .checked_edits import CheckedEdits, replace_once
     from .package_catalog import ARCHITECTURES, GROUPS, validate_name
+    from .workflow_utils import cli_error
 except ImportError:
     from checked_edits import CheckedEdits, replace_once
     from package_catalog import ARCHITECTURES, GROUPS, validate_name
+    from workflow_utils import cli_error
 
 __all__ = ["prepare", "prepare_extra", "prepare_udp_packaging", "replace_once"]
 
@@ -314,8 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             prepare(args.root, args.package, args.arch)
     except (OSError, ValueError) as error:
-        print(f"prepare_package_build: {error}", file=sys.stderr)
-        return 1
+        return cli_error("prepare_package_build", error)
     return 0
 
 
