@@ -42,6 +42,11 @@ def command_output(
     return result.strip() if strip else result
 
 
+def git(root: Path, *arguments: str, **kwargs) -> str:
+    """Run a git command in a repository and return its stripped stdout."""
+    return command_output(["git", *arguments], cwd=root, **kwargs)
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     """Replace a file only after its complete contents have been written.
 

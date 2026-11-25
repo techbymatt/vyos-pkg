@@ -37,7 +37,7 @@ try:
         validate_source,
     )
     from .workflow_utils import canonical_json as canonical_bytes
-    from .workflow_utils import command_output
+    from .workflow_utils import command_output, git
 except ImportError:
     import package_catalog as catalog
     from checked_edits import CheckedEdits
@@ -53,7 +53,7 @@ except ImportError:
         validate_source,
     )
     from workflow_utils import canonical_json as canonical_bytes
-    from workflow_utils import command_output
+    from workflow_utils import command_output, git
 
 __all__ = [
     "PIN_ENV",
@@ -82,11 +82,6 @@ KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
 fi"""
 GITLAB_HOSTS = {"salsa.debian.org", "gitlab.com", "gitlab.isc.org"}
 SOURCE_JOBS = 8
-
-
-def git(root: Path, *arguments: str, **kwargs) -> str:
-    """Run Git in a repository without altering persistent Git configuration."""
-    return command_output(["git", *arguments], cwd=root, **kwargs)
 
 
 class Resolver:

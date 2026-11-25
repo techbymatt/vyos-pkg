@@ -35,7 +35,7 @@ try:
         source_records,
     )
     from .package_cache import cache_prefix, visible_cache_keys
-    from .workflow_utils import atomic_write, command_output, output_lines
+    from .workflow_utils import atomic_write, command_output, git, output_lines
 except ImportError:
     import legacy_package_cache
     import package_catalog as catalog
@@ -50,7 +50,7 @@ except ImportError:
         source_records,
     )
     from package_cache import cache_prefix, visible_cache_keys
-    from workflow_utils import atomic_write, command_output, output_lines
+    from workflow_utils import atomic_write, command_output, git, output_lines
 
 __all__ = [
     "RESTORE_BATCH_SIZE",
@@ -75,11 +75,6 @@ def publication_changed(
         return manifest.canonical_bytes(current) != manifest.canonical_bytes(published)
     except (ValueError, RecursionError):
         return True
-
-
-def git(root: Path, *arguments: str) -> str:
-    """Run a git command in a repository and return its stripped stdout."""
-    return command_output(["git", *arguments], cwd=root)
 
 
 def fetch_caches(repository: str, ref: str) -> tuple[list[str], list[dict]]:
