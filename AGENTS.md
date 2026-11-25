@@ -11,7 +11,7 @@ When committing, use Conventional Commit subjects (e.g. `fix(ci): retry source l
 - Run **Test** from your branch with `package=<recipe>` or `package-extra=<repo>` (comma-separated lists accepted). Test skips caches and Publish pins; recipes use the patch repo's default branch, and standalone `deps` comes from the input, not the catalog. Unknown sources build on both arches; Go is automatic for unknown recipes, opt-in for catalogued ones.
 - Default `dual` includes mixed outputs; `independent_only` and `amd64_only` run only on amd64. No arm64-only policy exists. Skip `Architecture: all` sub-builds on arm64; don't delete duplicates afterward.
 - Recipe order: downstream patches → `prepare_package_build.py` → `package_sources.py pin` (Publish) or `package_sources.py retry-clones` (Test) → build. Keep `package_sources.checkout_source` importable via `workflow/scripts`. Pin full commits without changing version labels; Intel cleanup must reset to `HEAD`, not `origin/main`.
-- Audit custom build commands in `prepare_package_build.py` and nested clones in both discovery and pinning (`package_sources.py`). Use `CheckedEdits` so upstream drift fails before writing. Retry transport, not whole builds or signature verification. Exhausted kernel key lookups must abort: the upstream package loop catches `CalledProcessError` and otherwise continues.
+- Audit custom build commands in `prepare_package_build.py` and nested clones in both discovery (`recipe_inputs.py`) and pinning (`source_pinning.py`). Use `CheckedEdits` so upstream drift fails before writing. Retry transport, not whole builds or signature verification. Exhausted kernel key lookups must abort: the upstream package loop catches `CalledProcessError` and otherwise continues.
 
 ## Local checks
 
