@@ -4,7 +4,8 @@ set -euo pipefail
 
 probe_target() (
   local method=$1 label=$2 url=$3 family trace metrics tried rc auth_file
-  local -a args
+  local -a args families=(4)
+  if [[ ${PROBE_IPV6:-false} == true ]]; then families+=(6); fi
   trace=$(mktemp)
   auth_file=
   trap 'rm -f -- "$trace" ${auth_file:+"$auth_file"}' EXIT
@@ -31,7 +32,7 @@ probe_target() (
     # curl's verbose trace includes the Base64-encoded credential.
     args+=(--verbose)
   fi
-  for family in 4 6; do
+  for family in "${families[@]}"; do
     rc=0
     metrics=$(curl -q "-$family" --noproxy '*' --silent --show-error \
       "${args[@]}" \
@@ -63,7 +64,7 @@ fi
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
 } | tee -a "$summary"
 
-# Each worker reports both families. Keep concurrency low to avoid causing rate limits.
+# Keep concurrency low to avoid causing rate limits.
 while IFS=$'\t' read -r method label url; do
   printf '%s\0' "$method" "$label" "$url"
 done < "$1" | xargs -0 -n 3 -P 6 bash -e -o pipefail -c 'probe_target "$@"' _ \

@@ -253,6 +253,21 @@ class TestWorkflowTests(unittest.TestCase):
             probe,
         )
 
+    def test_build_probe_ipv6_is_manual_opt_in(self):
+        workflow = (WORKFLOWS / "probe-build-network.yaml").read_text()
+        dispatch, call = workflow.split("  workflow_call:\n", 1)
+        self.assertRegex(
+            dispatch,
+            r"      probe-ipv6:\n        description: [^\n]+\n"
+            r"        default: false\n        type: boolean\n",
+        )
+        self.assertNotIn("probe-ipv6:", call)
+        self.assertIn(
+            "    env:\n      PROBE_IPV6: ${{ github.event_name == 'workflow_dispatch'"
+            " && inputs.probe-ipv6 && 'true' || 'false' }}",
+            job_text(workflow, "probe"),
+        )
+
     def test_publish_waits_for_the_pages_artifact_before_deploying(self):
         """Artifact listings lag finalisation, so publish polls before deploying."""
         publish = job_text((WORKFLOWS / "publish.yaml").read_text(), "publish")

@@ -132,9 +132,11 @@ remain unchanged. Retries do not change Git URLs/revisions or the GPG key source
 
 ### Build network diagnostics
 
-**Probe build network** (`probe-build-network.yaml`) compares direct IPv4 and IPv6
-from the native build containers. Publish calls it once after the cache check,
-in parallel with builds/restores, using the resolved build image and patch
+**Probe build network** (`probe-build-network.yaml`) checks direct IPv4 access
+from the native build containers by default. Enable `probe-ipv6` when manually
+running **Probe build network** to test both IPv4 and IPv6. Publish and pull
+request probes are IPv4-only. Publish calls it once after the cache check, in
+parallel with builds/restores, using the resolved build image and patch
 revision. Unchanged runs skip diagnostics; failed planning still triggers them,
 falling back to the rolling image or patch default branch if those inputs could
 not be resolved. Builds, Verify and Publish do not depend on the probe result.

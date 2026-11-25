@@ -12,6 +12,10 @@ on:
         description: Patch repository revision; empty uses its default branch.
         default: ""
         type: string
+      probe-ipv6:
+        description: Also probe each resource over IPv6.
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       image:
@@ -101,6 +105,8 @@ jobs:
       contents: read
       packages: read
     timeout-minutes: 20
+    env:
+      PROBE_IPV6: ${{ github.event_name == 'workflow_dispatch' && inputs.probe-ipv6 && 'true' || 'false' }}
     steps:
       - name: Checkout probe tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -119,7 +125,7 @@ jobs:
           owner: techbymatt
           repositories: tbm-vyos-patch
           permission-contents: read
-      - name: Probe build resources over IPv4 and IPv6
+      - name: Probe build resources
         env:
           PROBE_ARCH: ${{ matrix.arch }}
           RECIPE_INVENTORY: ${{ needs.inventory.result }}

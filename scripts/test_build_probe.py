@@ -158,26 +158,41 @@ esac
 """
             )
             curl.chmod(0o755)
-            result = subprocess.run(
-                ["bash", str(script), str(inventory)],
-                env={
-                    **os.environ,
-                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                    "PATCH_TOKEN": "fixture-token",
-                    "RECIPE_INVENTORY": "failure",
-                },
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            report = summary.read_text()
-        self.assertEqual(report.count("| IPv4 | 0 | 192.0.2.8 | 192.0.2.8 | 200 |"), 3)
-        self.assertEqual(report.count("| IPv6 | 28 | [2001:db8::8] |  | 000 |"), 3)
-        self.assertIn("**Partial inventory:**", report)
-        self.assertNotIn("do not disclose", result.stdout + result.stderr + report)
-        self.assertNotIn("fixture-token", result.stdout + result.stderr + report)
+            env = {
+                **os.environ,
+                "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                "GITHUB_STEP_SUMMARY": str(summary),
+                "PATCH_TOKEN": "fixture-token",
+                "RECIPE_INVENTORY": "failure",
+            }
+            env.pop("PROBE_IPV6", None)
+            for ipv6 in (None, "false", "true"):
+                with self.subTest(ipv6=ipv6):
+                    summary.write_text("")
+                    if ipv6 is not None:
+                        env["PROBE_IPV6"] = ipv6
+                    result = subprocess.run(
+                        ["bash", str(script), str(inventory)],
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    report = summary.read_text()
+                    self.assertEqual(
+                        report.count("| IPv4 | 0 | 192.0.2.8 | 192.0.2.8 | 200 |"), 3
+                    )
+                    if ipv6 == "true":
+                        self.assertEqual(
+                            report.count("| IPv6 | 28 | [2001:db8::8] |  | 000 |"), 3
+                        )
+                    else:
+                        self.assertNotIn("| IPv6 |", report)
+                    self.assertIn("**Partial inventory:**", report)
+                    output = result.stdout + result.stderr + report
+                    self.assertNotIn("do not disclose", output)
+                    self.assertNotIn("fixture-token", output)
 
 
 if __name__ == "__main__":
