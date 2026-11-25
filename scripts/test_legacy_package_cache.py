@@ -237,7 +237,7 @@ class LegacyVerifierTests(unittest.TestCase):
         }
         self.producer_jobs = [job(old)]
         self.log = checkout_log(self.fixture.patch_commit)
-        self.real_command = sources.command_output
+        self.real_command = legacy.command_output
         self.real_check_output = subprocess.check_output
         self.api = self.enterContext(
             patch.object(self.verifier, "api", side_effect=self.api_output)
@@ -250,7 +250,7 @@ class LegacyVerifierTests(unittest.TestCase):
             )
         )
         self.commands = self.enterContext(
-            patch.object(sources, "command_output", side_effect=self.command_output)
+            patch.object(legacy, "command_output", side_effect=self.command_output)
         )
 
     def current_record(self, name, group="build", commit=COMMIT):

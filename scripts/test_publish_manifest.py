@@ -12,8 +12,10 @@ from pathlib import Path
 
 try:
     from . import publish_manifest as pm
+    from . import source_identity
 except ImportError:
     import publish_manifest as pm
+    import source_identity
 
 
 class PublishManifestTests(unittest.TestCase):
@@ -68,7 +70,7 @@ class PublishManifestTests(unittest.TestCase):
                 ],
             }
             row["source"] = source
-            row["source_digest"] = pm.package_sources.fingerprint(source)
+            row["source_digest"] = source_identity.fingerprint(source)
         self.write_rows(self.rows)
 
     def write_rows(self, rows: list[dict]) -> None:
@@ -204,7 +206,7 @@ class PublishManifestTests(unittest.TestCase):
         changed = self.create()
         source = changed["packages"][0]["source"]
         source["repositories"][0]["commit"] = "e" * 40
-        changed["packages"][0]["source_digest"] = pm.package_sources.fingerprint(source)
+        changed["packages"][0]["source_digest"] = source_identity.fingerprint(source)
         self.assert_changed(changed)
 
     def test_legacy_manifests_remain_readable(self) -> None:
@@ -234,7 +236,7 @@ class PublishManifestTests(unittest.TestCase):
         malformed = self.create()
         entry = malformed["packages"][0]
         entry["source"]["recipe_tree"] = None
-        entry["source_digest"] = pm.package_sources.fingerprint(entry["source"])
+        entry["source_digest"] = source_identity.fingerprint(entry["source"])
         self.assert_malformed(json.dumps(malformed))
 
     def test_missing_manifest_field(self) -> None:

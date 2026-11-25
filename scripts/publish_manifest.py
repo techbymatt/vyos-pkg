@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 try:
-    from . import source_identity as package_sources
+    from . import source_identity
     from .workflow_utils import atomic_write, canonical_json
 except ImportError:
-    import source_identity as package_sources
+    import source_identity
     from workflow_utils import atomic_write, canonical_json
 
 
@@ -115,11 +115,11 @@ def validate_manifest(value: object) -> Manifest:
         )
         if schema == 2:
             try:
-                source = package_sources.validate_source(entry["source"])
+                source = source_identity.validate_source(entry["source"])
             except TypeError as error:
                 raise ValueError("invalid package source") from error
             digest = require_pattern(entry["source_digest"], HEX256, "source digest")
-            if digest != package_sources.fingerprint(source):
+            if digest != source_identity.fingerprint(source):
                 raise ValueError("source digest does not match its inputs")
             if (source["recipe_tree"] is None) != (group == "build-extra"):
                 raise ValueError("source recipe tree does not match the build group")

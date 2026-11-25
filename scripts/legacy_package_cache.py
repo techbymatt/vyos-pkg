@@ -18,13 +18,19 @@ from datetime import datetime
 from pathlib import PurePosixPath
 
 try:
-    from . import package_sources as sources
     from . import publish_manifest as manifest
     from .package_cache import CacheIndex
+    from .recipe_inputs import RecipeReader
+    from .source_identity import REVISION, fingerprint
+    from .source_resolver import Resolver
+    from .workflow_utils import command_output
 except ImportError:
-    import package_sources as sources
     import publish_manifest as manifest
     from package_cache import CacheIndex
+    from recipe_inputs import RecipeReader
+    from source_identity import REVISION, fingerprint
+    from source_resolver import Resolver
+    from workflow_utils import command_output
 
 LEGACY_KEY = re.compile(
     r"^cache-v2-(?P<package>[a-z0-9][a-z0-9_+.-]*)-(?P<arch>amd64|arm64)-"
@@ -108,7 +114,7 @@ def checkout_evidence(
             active = directories.get(PurePosixPath(clone[1]).name)
         checkout = re.match(r"HEAD is now at ([0-9a-f]{7,64})\b", text)
         if checkout is None:
-            checkout = re.match(rf"Note: switching to '({sources.REVISION})'", text)
+            checkout = re.match(rf"Note: switching to '({REVISION})'", text)
         if active and checkout:
             previous = commits.get(active)
             if previous is not None and not (
@@ -126,7 +132,7 @@ class LegacyVerifier:
     """Memoized, time-bounded proof lookup for visible legacy cache entries."""
 
     def __init__(
-        self, repository: str, reader: sources.RecipeReader, resolver: sources.Resolver
+        self, repository: str, reader: RecipeReader, resolver: Resolver
     ):
         """Share source metadata lookups with the current publication planner."""
         self.repository = repository
@@ -144,7 +150,7 @@ class LegacyVerifier:
         if paginate:
             command.extend(("--paginate", "--slurp"))
         command.append(f"repos/{self.repository}/{endpoint}")
-        return json.loads(sources.command_output(command, timeout=60))
+        return json.loads(command_output(command, timeout=60))
 
     def producer_manifest(self, run: str) -> dict:
         """Load the producer's candidate inputs once, regardless of deployment."""
@@ -199,7 +205,7 @@ class LegacyVerifier:
         identifier = job["id"]
         if identifier not in self.evidence:
             self.evidence[identifier] = None
-            log = sources.command_output(
+            log = command_output(
                 [
                     "gh",
                     "api",
@@ -277,7 +283,7 @@ class LegacyVerifier:
                     ]
                     if len(expected) != 1:
                         raise ValueError("recipe-cloned repositories changed")
-                    if re.fullmatch(sources.REVISION, entry["ref"].lower()):
+                    if re.fullmatch(REVISION, entry["ref"].lower()):
                         actual = entry["ref"].lower()
                         if not actual.startswith(abbreviated):
                             raise ValueError(
@@ -288,7 +294,7 @@ class LegacyVerifier:
                             entry["url"], abbreviated, expected[0]
                         )
                     entry["commit"] = actual
-                if sources.fingerprint(source) != record["source_digest"]:
+                if fingerprint(source) != record["source_digest"]:
                     raise ValueError("recipe-cloned source revisions changed")
             self.reasons[identity] = "legacy source inputs verified"
             return True
