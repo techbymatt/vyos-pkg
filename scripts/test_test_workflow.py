@@ -253,6 +253,20 @@ class TestWorkflowTests(unittest.TestCase):
             probe,
         )
 
+    def test_publish_waits_for_the_pages_artifact_before_deploying(self):
+        """Artifact listings lag finalisation, so publish polls before deploying."""
+        publish = job_text((WORKFLOWS / "publish.yaml").read_text(), "publish")
+        self.assertIn("actions: read", publish)
+        upload = publish.index("uses: actions/upload-pages-artifact@")
+        wait = publish.index("name: Wait for the Pages artifact to be listed")
+        deploy = publish.index("uses: actions/deploy-pages@")
+        self.assertLess(upload, wait)
+        self.assertLess(wait, deploy)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", publish)
+        self.assertIn(
+            "actions/runs/${GITHUB_RUN_ID}/artifacts?name=github-pages", publish
+        )
+
     def test_publish_calls_one_non_gating_network_probe(self):
         """Diagnostics skip no-op runs but still run after a failed cache check."""
         workflow = (WORKFLOWS / "publish.yaml").read_text()
