@@ -210,6 +210,7 @@ jobs:
     needs:
       - verify
     permissions:
+      actions: read
       contents: read
       id-token: write
       pages: write
@@ -276,6 +277,26 @@ jobs:
         run: cp "$RUNNER_TEMP/publication/input-manifest.json" _site/input-manifest.json
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      # deploy-pages looks the artifact up by name and the artifacts listing is
+      # eventually consistent, so the freshly finalised upload can be missing
+      # from the listing for a few seconds. Poll until it is visible.
+      - name: Wait for the Pages artifact to be listed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            count="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=github-pages" \
+              --jq '.artifacts | length')"
+            if [ "$count" -ge 1 ]; then
+              echo "github-pages artifact listed after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::github-pages artifact was not listed after 150 seconds"
+          exit 1
       - id: deployment
         name: Deploy to GitHub Pages
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
