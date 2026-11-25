@@ -1,26 +1,21 @@
 """Fingerprint package sources and pin recipe checkouts to planned commits.
 
-Only a package's patched recipe, the Git revisions it builds, and explicitly
-audited out-of-folder source inputs contribute to its fingerprint. Build images,
-local orchestration/adaptations, shared builders, and unrelated patches do not.
+Compatibility facade and CLI. The implementation lives in recipe_inputs.py
+(patched-recipe readers, no network), source_resolver.py (bounded Git ref
+resolution) and source_pinning.py (audited checkouts and pins). This module
+re-exports the historical package_sources API unchanged — upstream builders do
+`from package_sources import checkout_source` — and keeps the
+`python3 -m scripts.package_sources` / `python3 scripts/package_sources.py`
+entry points used by the build workflows.
 """
 
 from __future__ import annotations
 
 import argparse
-import copy
-import hashlib
 import json
-import os
-import re
-import shlex
 import subprocess
 import sys
-import tempfile
-import tomllib
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import quote, urlsplit
 
 try:
     from . import package_catalog as catalog
@@ -28,6 +23,15 @@ try:
     from .git_network import clone_repository, remote_git
     from .package_cache import cache_prefix
     from .prepare_package_build import stage_git_clones
+    from .recipe_inputs import (
+        KERNEL_VPP_BUILD,
+        RecipeReader,
+        audit_kernel_vpp_build,
+        discover_sources,
+        kea_repository,
+        kernel_uses_vpp,
+        recipe_repositories,
+    )
     from .source_identity import (
         REVISION,
         fingerprint,
@@ -35,6 +39,22 @@ try:
         source_text,
         validate_repositories,
         validate_source,
+    )
+    from .source_pinning import (
+        KEA_CLONE,
+        PIN_ENV,
+        checkout_source,
+        pin_recipe,
+        retry_recipe_clones,
+        stage_kea_clone,
+        stage_recipe_pins,
+    )
+    from .source_resolver import (
+        GITLAB_HOSTS,
+        SHORT_REVISION,
+        SOURCE_JOBS,
+        Resolver,
+        resolve_sources,
     )
     from .workflow_utils import canonical_json as canonical_bytes
     from .workflow_utils import command_output, git
@@ -44,6 +64,15 @@ except ImportError:
     from git_network import clone_repository, remote_git
     from package_cache import cache_prefix
     from prepare_package_build import stage_git_clones
+    from recipe_inputs import (
+        KERNEL_VPP_BUILD,
+        RecipeReader,
+        audit_kernel_vpp_build,
+        discover_sources,
+        kea_repository,
+        kernel_uses_vpp,
+        recipe_repositories,
+    )
     from source_identity import (
         REVISION,
         fingerprint,
@@ -52,556 +81,61 @@ except ImportError:
         validate_repositories,
         validate_source,
     )
+    from source_pinning import (
+        KEA_CLONE,
+        PIN_ENV,
+        checkout_source,
+        pin_recipe,
+        retry_recipe_clones,
+        stage_kea_clone,
+        stage_recipe_pins,
+    )
+    from source_resolver import (
+        GITLAB_HOSTS,
+        SHORT_REVISION,
+        SOURCE_JOBS,
+        Resolver,
+        resolve_sources,
+    )
     from workflow_utils import canonical_json as canonical_bytes
     from workflow_utils import command_output, git
 
 __all__ = [
+    "GITLAB_HOSTS",
+    "KEA_CLONE",
+    "KERNEL_VPP_BUILD",
     "PIN_ENV",
     "REVISION",
+    "SHORT_REVISION",
+    "SOURCE_JOBS",
     "RecipeReader",
     "Resolver",
     "cache_prefix",
     "canonical_bytes",
+    "catalog",
     "checkout_source",
+    "command_output",
     "discover_sources",
     "fingerprint",
+    "git",
     "pin_recipe",
+    "resolve_sources",
+    "retry_recipe_clones",
     "revision",
     "source_text",
     "validate_repositories",
     "validate_source",
+    "audit_kernel_vpp_build",
+    "CheckedEdits",
+    "clone_repository",
+    "remote_git",
+    "stage_git_clones",
+    "kea_repository",
+    "kernel_uses_vpp",
+    "recipe_repositories",
+    "stage_kea_clone",
+    "stage_recipe_pins",
 ]
-
-SHORT_REVISION = r"[0-9a-fA-F]{7,39}"
-PIN_ENV = "PACKAGE_SOURCE_REVISIONS"
-KEA_CLONE = "git clone --branch ${BRANCH} "
-KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
-    cd ../vpp/
-    ./build.py
-    cd ${CWD}
-fi"""
-GITLAB_HOSTS = {"salsa.debian.org", "gitlab.com", "gitlab.isc.org"}
-SOURCE_JOBS = 8
-
-
-class Resolver:
-    """Resolve only refs actually built, memoizing remote and commit lookups."""
-
-    def __init__(self) -> None:
-        """Create temporary metadata storage for abbreviated non-GitHub commits."""
-        self.temporary = tempfile.TemporaryDirectory(prefix="package-revisions-")
-        self.commits: dict[tuple[str, str], str] = {}
-        self.remotes: dict[str, dict[str, str]] = {}
-        self.repositories: dict[str, Path] = {}
-
-    def close(self) -> None:
-        """Remove metadata-only clones after planning."""
-        self.temporary.cleanup()
-
-    def resolve(self, url: str, ref: str) -> str:
-        """Resolve full/abbreviated commits, branches, and peeled annotated tags."""
-        source_text(url, "URL")
-        source_text(ref, "ref")
-        identity = url, ref
-        if identity in self.commits:
-            return self.commits[identity]
-        if re.fullmatch(REVISION, ref.lower()):
-            commit = ref.lower()
-        else:
-            if url not in self.remotes:
-                output = remote_git("ls-remote", "--", url)
-                self.remotes[url] = {
-                    name: revision(sha)
-                    for sha, name in (line.split() for line in output.splitlines())
-                }
-            remote = self.remotes[url]
-            names = (
-                [ref]
-                if ref == "HEAD" or ref.startswith("refs/")
-                else [f"refs/heads/{ref}", f"refs/tags/{ref}"]
-            )
-            matches = [name for name in names if name in remote]
-            if len(matches) > 1:
-                raise ValueError(f"missing or ambiguous source ref {url} {ref}")
-            if matches:
-                # Ref names take precedence over abbreviated object IDs. In
-                # particular, firmware's YYYYMMDD tags contain only hex digits.
-                name = matches[0]
-                commit = remote.get(name + "^{}", remote[name])
-            elif re.fullmatch(SHORT_REVISION, ref):
-                commit = self.abbreviated_commit(url, ref)
-            else:
-                raise ValueError(f"missing or ambiguous source ref {url} {ref}")
-        self.commits[identity] = revision(commit)
-        return commit
-
-    def resolve_many(
-        self, repositories: list[dict], *, jobs: int = SOURCE_JOBS
-    ) -> dict[tuple[str, str], str]:
-        """Resolve independent remotes concurrently, serializing refs per URL.
-
-        All requests for one URL share one ls-remote snapshot and metadata clone.
-        Do not parallelize recipes/isolated-index patching or legacy proof state.
-        Results and exceptions are consumed in deterministic URL order.
-        """
-        if jobs < 1:
-            raise ValueError("source lookup jobs must be positive")
-        grouped: dict[str, list[str]] = {}
-        for entry in repositories:
-            url, ref = (
-                source_text(entry["url"], "URL"),
-                source_text(entry["ref"], "ref"),
-            )
-            if ref not in grouped.setdefault(url, []):
-                grouped[url].append(ref)
-
-        def resolve_url(url: str) -> dict[tuple[str, str], str]:
-            return {(url, ref): self.resolve(url, ref) for ref in grouped[url]}
-
-        result = {}
-        with ThreadPoolExecutor(max_workers=jobs) as executor:
-            for resolved in executor.map(resolve_url, sorted(grouped)):
-                result.update(resolved)
-        return result
-
-    def abbreviated_commit(self, url: str, ref: str) -> str:
-        """Expand a commit ID through a commit API or metadata-only Git clone."""
-        parsed = urlsplit(url)
-        path = parsed.path.removesuffix(".git").strip("/")
-        if parsed.hostname == "github.com" and len(path.split("/")) == 2:
-            commit = command_output(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{path}/commits/{quote(ref, safe='')}",
-                    "--jq",
-                    ".sha",
-                ]
-            )
-        elif parsed.hostname in GITLAB_HOSTS:
-            endpoint = (
-                f"https://{parsed.netloc}/api/v4/projects/{quote(path, safe='')}/"
-                f"repository/commits/{quote(ref, safe='')}?stats=false"
-            )
-            commit = json.loads(
-                command_output(
-                    [
-                        "curl",
-                        "--fail",
-                        "--silent",
-                        "--show-error",
-                        "--location",
-                        "--connect-timeout",
-                        "10",
-                        "--max-time",
-                        "60",
-                        endpoint,
-                    ]
-                )
-            )["id"]
-        else:
-            if url not in self.repositories:
-                # Parallel URL lookups must not race for the same clone directory.
-                directory = (
-                    Path(self.temporary.name) / hashlib.sha256(url.encode()).hexdigest()
-                )
-                clone_repository(
-                    directory, url, "--bare", "--filter=blob:none", timeout=300
-                )
-                self.repositories[url] = directory
-            commit = git(
-                self.repositories[url], "rev-parse", "--verify", f"{ref}^{{commit}}"
-            )
-        return revision(commit)
-
-    def resolve_evidence(self, url: str, abbreviated: str, expected: str) -> str:
-        """Expand legacy IDs without cloning large repositories just for proof.
-
-        Commit APIs and metadata clones already needed by current recipes can
-        resolve abbreviated IDs unambiguously. Other hosts need a full recorded
-        ID; a tag name or matching short prefix alone is not sufficient proof.
-        """
-        if (
-            re.fullmatch(REVISION, abbreviated) is None
-            and (url, abbreviated) not in self.commits
-            and url not in self.repositories
-            and urlsplit(url).hostname not in GITLAB_HOSTS | {"github.com"}
-        ):
-            raise ValueError(
-                "producer recorded only an unverifiable abbreviated checkout"
-            )
-        identity = url, abbreviated
-        if identity not in self.commits:
-            self.commits[identity] = (
-                revision(abbreviated)
-                if re.fullmatch(REVISION, abbreviated)
-                else self.abbreviated_commit(url, abbreviated)
-            )
-        actual = self.commits[identity]
-        if actual != expected or not actual.startswith(abbreviated.lower()):
-            raise ValueError("recipe-cloned source revision changed")
-        return actual
-
-
-class RecipeReader:
-    """Read current/historical patched recipes through isolated Git indexes.
-
-    Applying the same patches with --cached --3way produces the same tracked
-    tree as the build checkout, without rewriting its worktree or real index.
-    Historical trees are used only to prove legacy-cache source identities.
-    """
-
-    def __init__(self, patch_root: Path) -> None:
-        """Keep patched tree results shared across all package architectures."""
-        self.patch_root = patch_root
-        self.root = patch_root / "vyos-build"
-        self.trees: dict[str, tuple[str, str]] = {}
-        self.recipes: dict[tuple[str, str], dict] = {}
-        self.revisions: dict[tuple[str, str], str] = {}
-
-    def patched_tree(self, patch_commit: str) -> tuple[str, str]:
-        """Return the pinned upstream commit and downstream-patched tree."""
-        revision(patch_commit)
-        if patch_commit not in self.trees:
-            entry = git(self.patch_root, "ls-tree", patch_commit, "vyos-build").split()
-            if len(entry) != 4 or entry[:2] != ["160000", "commit"]:
-                raise ValueError("patch repository must pin the vyos-build submodule")
-            upstream = revision(entry[2])
-            patches = git(
-                self.patch_root,
-                "ls-tree",
-                "-r",
-                "--name-only",
-                patch_commit,
-                "--",
-                "patches/vyos-build/",
-            ).splitlines()
-            with tempfile.TemporaryDirectory(prefix="package-index-") as temporary:
-                env = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
-                git(self.root, "read-tree", upstream, env=env)
-                for path in sorted(path for path in patches if path.endswith(".patch")):
-                    patch = git(
-                        self.patch_root, "show", f"{patch_commit}:{path}", strip=False
-                    )
-                    git(
-                        self.root,
-                        "apply",
-                        "--cached",
-                        "--3way",
-                        "-",
-                        env=env,
-                        input_text=patch,
-                    )
-                tree = revision(git(self.root, "write-tree", env=env))
-            self.trees[patch_commit] = upstream, tree
-        return self.trees[patch_commit]
-
-    def text(self, tree: str, path: str) -> str:
-        """Read a tracked file from a patched tree."""
-        return git(self.root, "show", f"{tree}:{path}", strip=False)
-
-    def recipe(self, package: str, patch_commit: str) -> dict:
-        """Describe one recipe's patched files, scoped inputs, and Git refs."""
-        catalog.validate_name(package)
-        identity = package, patch_commit
-        if identity not in self.recipes:
-            self.recipes[identity] = self.read_recipe(package, patch_commit)
-        # Resolution/legacy proof annotates repository dictionaries with commits.
-        # Never let those annotations mutate the cached discovery snapshot.
-        return copy.deepcopy(self.recipes[identity])
-
-    def read_recipe(self, package: str, patch_commit: str) -> dict:
-        """Read uncached recipe inputs, including explicitly audited nested sources."""
-        _, tree = self.patched_tree(patch_commit)
-        directory = f"scripts/package-build/{package}"
-        recipe_tree = revision(git(self.root, "rev-parse", f"{tree}:{directory}"))
-        config = tomllib.loads(self.text(tree, f"{directory}/package.toml"))
-        repositories = recipe_repositories(config)
-        if package == "isc-kea":
-            repositories.append(
-                kea_repository(self.text(tree, f"{directory}/prebuild.sh"))
-            )
-        inputs = {}
-        if package == "linux-kernel":
-            defaults = tomllib.loads(self.text(tree, "data/defaults.toml"))
-            kernel = next(
-                entry for entry in config["packages"] if entry["name"] == "linux-kernel"
-            )
-            inputs = {
-                key: source_text(kernel.get(key, defaults.get(key)), key)
-                for key in ("kernel_version", "kernel_flavor")
-            }
-            certificates = [
-                line
-                for line in git(
-                    self.root, "ls-tree", "-r", tree, "--", "data/certificates/"
-                ).splitlines()
-                if line.startswith(("100644 blob ", "100755 blob "))
-                and line.endswith(".pem")
-            ]
-            inputs["certificates"] = hashlib.sha256(
-                canonical_bytes(certificates)
-            ).hexdigest()
-            if kernel_uses_vpp(config):
-                audit_kernel_vpp_build(
-                    self.text(tree, f"{directory}/build-accel-ppp-ng.sh")
-                )
-                nested = self.recipe("vpp", patch_commit)
-                inputs["vpp_recipe_tree"] = nested["recipe_tree"]
-                repositories.extend(nested["repositories"])
-        return {
-            "recipe_tree": recipe_tree,
-            "inputs": inputs,
-            "repositories": repositories,
-        }
-
-    def legacy_revision(self, package: str, patch_commit: str) -> str:
-        """Retain the original path revision for diagnostics and legacy lookups."""
-        catalog.validate_name(package)
-        identity = package, patch_commit
-        if identity in self.revisions:
-            return self.revisions[identity]
-        upstream, _ = self.patched_tree(patch_commit)
-        paths = [f"scripts/package-build/{package}/"]
-        if package == "linux-kernel":
-            paths.insert(0, "data/defaults.toml")
-        self.revisions[identity] = revision(
-            git(self.root, "log", "-n", "1", "--format=%H", upstream, "--", *paths)
-        )
-        return self.revisions[identity]
-
-
-def recipe_repositories(config: dict) -> list[dict]:
-    """Read declared Git sources while retaining their original version labels."""
-    repositories = []
-    for entry in config["packages"]:
-        url, ref = entry.get("scm_url", ""), entry.get("commit_id", "")
-        if url or ref:
-            repositories.append(
-                {
-                    "name": catalog.validate_name(entry["name"]),
-                    "url": source_text(url, "URL"),
-                    "ref": source_text(ref, "ref"),
-                }
-            )
-    return repositories
-
-
-def kernel_uses_vpp(config: dict) -> bool:
-    """Identify the kernel sub-build which consumes the sibling VPP recipe."""
-    return any(
-        entry.get("build_cmd") == "build_accel_ppp_ng" for entry in config["packages"]
-    )
-
-
-def audit_kernel_vpp_build(script: str) -> None:
-    """Require the audited sibling build rather than guessing a changed clone path."""
-    if script.count(KERNEL_VPP_BUILD) != 1:
-        raise ValueError("linux-kernel: expected one audited nested VPP build")
-
-
-def kea_repository(script: str) -> dict:
-    """Read the audited extra packaging clone, failing on command/variable drift."""
-    branches = re.findall(r'^BRANCH="([^"$]+)"$', script, re.MULTILINE)
-    clones = re.findall(
-        r"^git clone --branch \$\{BRANCH\} (\S+)$", script, re.MULTILINE
-    )
-    if len(branches) != 1 or len(clones) != 1:
-        raise ValueError("isc-kea: expected one audited packaging repository clone")
-    return {
-        "name": "kea-packaging",
-        "url": source_text(clones[0], "URL"),
-        "ref": source_text(branches[0], "ref"),
-    }
-
-
-def discover_sources(reader: RecipeReader, sources: dict, patch_commit: str) -> dict:
-    """Describe catalogued sources without contacting their Git remotes."""
-    descriptions = {}
-    for definition in catalog.iter_sources(sources):
-        group, name = definition.group, definition.name
-        if group == "build":
-            source = reader.recipe(name, patch_commit)
-        else:
-            source = {
-                "recipe_tree": None,
-                "inputs": {},
-                "repositories": [
-                    {
-                        "name": name,
-                        "url": f"https://github.com/vyos/{name}.git",
-                        "ref": "rolling",
-                    }
-                ],
-            }
-        descriptions[group, name] = source
-    return descriptions
-
-
-def resolve_sources(
-    reader: RecipeReader,
-    resolver: Resolver,
-    sources: dict,
-    patch_commit: str,
-    *,
-    jobs: int = SOURCE_JOBS,
-) -> dict:
-    """Discover sources serially, then resolve independent remotes in parallel."""
-    descriptions = discover_sources(reader, sources, patch_commit)
-    legacy = {
-        (group, name): reader.legacy_revision(name, patch_commit)
-        for group, name in descriptions
-        if group == "build"
-    }
-    commits = resolver.resolve_many(
-        [entry for source in descriptions.values() for entry in source["repositories"]],
-        jobs=jobs,
-    )
-    result = {}
-    for identity, source in descriptions.items():
-        for repository in source["repositories"]:
-            repository["commit"] = commits[repository["url"], repository["ref"]]
-        source = validate_source(source)
-        result[identity] = {
-            "commit": legacy.get(identity) or source["repositories"][0]["commit"],
-            "source": source,
-            "source_digest": fingerprint(source),
-        }
-    return result
-
-
-def checkout_source(directory: Path, url: str, ref: str) -> None:
-    """Check out the planned commit, preserving original ref labels in recipes."""
-    repositories = validate_repositories(json.loads(os.environ[PIN_ENV]))
-    matches = [
-        entry["commit"]
-        for entry in repositories
-        if (entry["url"], entry["ref"]) == (url, ref)
-    ]
-    if len(set(matches)) != 1:
-        raise ValueError(f"missing or ambiguous planned checkout {url} {ref}")
-    commit = matches[0]
-    try:
-        git(directory, "cat-file", "-e", f"{commit}^{{commit}}")
-    except subprocess.CalledProcessError:
-        remote_git("fetch", "origin", commit, cwd=directory, timeout=300)
-    git(directory, "checkout", "--detach", commit)
-    print(f"Source checkout: {url} {ref} -> {commit}", flush=True)
-
-
-def pin_recipe(root: Path, package: str, repositories: list[dict]) -> None:
-    """Adapt audited Git clones and checkouts without rewriting version labels."""
-    edits = CheckedEdits()
-    stage_recipe_pins(root, package, repositories, edits)
-    stage_git_clones(root, package, edits)
-    edits.commit()
-
-
-def retry_recipe_clones(root: Path, package: str) -> None:
-    """Make Test clones resilient without changing the recipe's original refs."""
-    catalog.validate_name(package)
-    edits = CheckedEdits()
-    stage_git_clones(root, package, edits)
-    if package == "isc-kea":
-        script = root / package / "prebuild.sh"
-        repository = kea_repository(edits.read(script))
-        stage_kea_clone(script, repository["url"], edits, pinned=False)
-    edits.commit()
-
-
-def stage_recipe_pins(
-    root: Path, package: str, repositories: list[dict], edits: CheckedEdits
-) -> None:
-    """Validate every parent/nested adaptation before changing any builder."""
-    repositories = validate_repositories(repositories)
-    directory = root / catalog.validate_name(package)
-    config = tomllib.loads((directory / "package.toml").read_text())
-    expected = recipe_repositories(config)
-    nested = []
-    if package == "linux-kernel" and kernel_uses_vpp(config):
-        audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
-        nested = recipe_repositories(
-            tomllib.loads((root / "vpp/package.toml").read_text())
-        )
-        expected.extend(nested)
-    if package == "isc-kea":
-        expected.append(kea_repository((directory / "prebuild.sh").read_text()))
-    actual = [
-        {key: entry[key] for key in ("name", "url", "ref")} for entry in repositories
-    ]
-    if sorted(expected, key=lambda entry: entry["name"]) != actual:
-        raise ValueError(
-            f"{package}: planned repositories do not match the patched recipe"
-        )
-    builder = directory / "build.py"
-    if package == "linux-kernel":
-        command = "run(['git', 'checkout', commit_id], cwd=repo_dir, check=True)"
-        edits.replace(
-            builder, command, "checkout_source(repo_dir, scm_url, commit_id)", count=2
-        )
-        if any(
-            entry.get("build_cmd") == "build_intel_nic" for entry in config["packages"]
-        ):
-            # Older recipes discard the declared tag before compilation; newer
-            # recipes already reset to HEAD. Require one audited reset in either
-            # form so extra commands cannot move away from the planned checkout.
-            driver = directory / "build-intel-nic.sh"
-            resets = re.findall(
-                r"^[ \t]*git[ \t]+reset\b.*$", edits.read(driver), re.MULTILINE
-            )
-            if resets not in (
-                ["    git reset --hard origin/main"],
-                ["    git reset --hard HEAD"],
-            ):
-                raise ValueError(
-                    f"{driver}: expected exactly one audited Intel driver reset"
-                )
-            edits.replace(
-                driver,
-                f"\n{resets[0]}\n",
-                "\n    git reset --hard HEAD\n",
-            )
-    else:
-        if not builder.is_symlink() or os.readlink(builder) != "../build.py":
-            raise ValueError(f"{package}: unaudited custom source builder")
-        builder = root / "build.py"
-        edits.replace(
-            builder,
-            "run(['git', 'checkout', package['commit_id']], cwd=repo_dir, check=True)",
-            "checkout_source(repo_dir, package['scm_url'], package['commit_id'])",
-        )
-    edits.replace(
-        builder,
-        "from subprocess import run, CalledProcessError",
-        "from subprocess import run, CalledProcessError\nfrom package_sources import checkout_source",
-    )
-    if nested:
-        names = {entry["name"] for entry in nested}
-        stage_recipe_pins(
-            root,
-            "vpp",
-            [entry for entry in repositories if entry["name"] in names],
-            edits,
-        )
-    if package == "isc-kea":
-        repository = next(
-            entry for entry in repositories if entry["name"] == "kea-packaging"
-        )
-        stage_kea_clone(
-            directory / "prebuild.sh", repository["url"], edits, pinned=True
-        )
-
-
-def stage_kea_clone(path: Path, url: str, edits: CheckedEdits, *, pinned: bool) -> None:
-    """Use the retrying clone helper and stop the hook if cloning fails."""
-    command = (
-        "python3 -m package_sources checkout --directory kea-packaging --url "
-        + shlex.quote(url)
-        + ' --ref "$BRANCH"'
-    )
-    if not pinned:
-        command += " --unplanned"
-    edits.replace(path, KEA_CLONE + url, command + " || exit $?")
 
 
 def main(argv: list[str] | None = None) -> int:
