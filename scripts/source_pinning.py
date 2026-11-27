@@ -92,17 +92,8 @@ def stage_recipe_pins(
     directory = root / catalog.validate_name(package)
     config = tomllib.loads((directory / "package.toml").read_text())
     expected = recipe_repositories(config)
-    nested = []
-    if (
-        package == "linux-kernel"
-        and kernel_uses_vpp(config)
-        and audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
-        == "nested"
-    ):
-        nested = recipe_repositories(
-            tomllib.loads((root / "vpp/package.toml").read_text())
-        )
-        expected.extend(nested)
+    if package == "linux-kernel" and kernel_uses_vpp(config):
+        audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
     if package == "isc-kea":
         expected.append(kea_repository((directory / "prebuild.sh").read_text()))
     actual = [
@@ -121,25 +112,16 @@ def stage_recipe_pins(
         if any(
             entry.get("build_cmd") == "build_intel_nic" for entry in config["packages"]
         ):
-            # Older recipes discard the declared tag before compilation; newer
-            # recipes already reset to HEAD. Require one audited reset in either
-            # form so extra commands cannot move away from the planned checkout.
+            # Require one audited reset to HEAD so driver cleanup cannot move
+            # away from the planned checkout.
             driver = directory / "build-intel-nic.sh"
             resets = re.findall(
-                r"^[ \t]*git[ \t]+reset\b.*$", edits.read(driver), re.MULTILINE
+                r"^[ \t]*git[ \t]+reset\b.*$", driver.read_text(), re.MULTILINE
             )
-            if resets not in (
-                ["    git reset --hard origin/main"],
-                ["    git reset --hard HEAD"],
-            ):
+            if resets != ["    git reset --hard HEAD"]:
                 raise ValueError(
                     f"{driver}: expected exactly one audited Intel driver reset"
                 )
-            edits.replace(
-                driver,
-                f"\n{resets[0]}\n",
-                "\n    git reset --hard HEAD\n",
-            )
     else:
         if not builder.is_symlink() or os.readlink(builder) != "../build.py":
             raise ValueError(f"{package}: unaudited custom source builder")
@@ -154,14 +136,6 @@ def stage_recipe_pins(
         "from subprocess import run, CalledProcessError",
         "from subprocess import run, CalledProcessError\nfrom package_sources import checkout_source",
     )
-    if nested:
-        names = {entry["name"] for entry in nested}
-        stage_recipe_pins(
-            root,
-            "vpp",
-            [entry for entry in repositories if entry["name"] in names],
-            edits,
-        )
     if package == "isc-kea":
         repository = next(
             entry for entry in repositories if entry["name"] == "kea-packaging"

@@ -209,24 +209,17 @@ class PublishManifestTests(unittest.TestCase):
         changed["packages"][0]["source_digest"] = source_identity.fingerprint(source)
         self.assert_changed(changed)
 
-    def test_legacy_manifests_remain_readable(self) -> None:
-        """Exact schema v1 remains available as legacy producer metadata."""
+    def test_schema_v1_manifests_are_rejected(self) -> None:
+        """Retired schema v1 manifests fail validation."""
         legacy = self.create()
         legacy["schema_version"] = 1
         for entry in legacy["packages"]:
             del entry["source"]
             del entry["source_digest"]
-        self.current.write_text(json.dumps(legacy))
-        self.assertEqual(pm.load_manifest(self.current)["schema_version"], 1)
-        self.assertTrue(
-            all(
-                "source" not in row
-                for row in pm.load_manifest(self.current)["packages"]
-            )
-        )
+        self.assert_malformed(json.dumps(legacy))
 
     def test_source_fingerprint_and_build_group_are_validated(self) -> None:
-        """Inconsistent source metadata cannot authorize publication or migration."""
+        """Inconsistent source metadata cannot authorize publication."""
         malformed = self.create()
         malformed["packages"][0]["source_digest"] = "f" * 64
         self.assert_malformed(json.dumps(malformed))

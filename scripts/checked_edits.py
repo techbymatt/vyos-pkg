@@ -40,10 +40,3 @@ class CheckedEdits:
         """Write the fully validated edits, preserving executable bits/symlinks."""
         for path, text in self.contents.items():
             atomic_write(path, text.encode("utf-8"))
-
-
-def replace_once(path: Path, old: str, new: str) -> None:
-    """Apply a single checked replacement; use CheckedEdits for multi-file changes."""
-    edits = CheckedEdits()
-    edits.replace(path, old, new)
-    edits.commit()

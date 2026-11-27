@@ -17,11 +17,10 @@ from urllib.parse import quote
 
 try:
     from . import (
-        legacy_package_cache,
-        package_sources,
+        package_catalog as catalog,
     )
     from . import (
-        package_catalog as catalog,
+        package_sources,
     )
     from . import (
         publish_manifest as manifest,
@@ -35,9 +34,14 @@ try:
         source_records,
     )
     from .package_cache import cache_prefix, visible_cache_keys
-    from .workflow_utils import atomic_write, cli_error, command_output, git, output_lines
+    from .workflow_utils import (
+        atomic_write,
+        cli_error,
+        command_output,
+        git,
+        output_lines,
+    )
 except ImportError:
-    import legacy_package_cache
     import package_catalog as catalog
     import package_sources
     import publish_manifest as manifest
@@ -50,7 +54,13 @@ except ImportError:
         source_records,
     )
     from package_cache import cache_prefix, visible_cache_keys
-    from workflow_utils import atomic_write, cli_error, command_output, git, output_lines
+    from workflow_utils import (
+        atomic_write,
+        cli_error,
+        command_output,
+        git,
+        output_lines,
+    )
 
 __all__ = [
     "RESTORE_BATCH_SIZE",
@@ -179,10 +189,9 @@ def build_reason(
     inaccessible: list[dict],
     ref: str,
     *,
-    legacy_note: str | None = None,
     force_rebuild: bool = False,
 ) -> str:
-    """Explain the final build decision; rejected legacy fallbacks are secondary."""
+    """Explain the final build decision from source changes and cache scope."""
     if force_rebuild:
         return "forced rebuild"
     reasons = []
@@ -203,8 +212,6 @@ def build_reason(
         reasons.append(
             f"matching source cache inaccessible from {ref}: " + ", ".join(refs)
         )
-    if legacy_note and not changed:
-        reasons.append("legacy migration requires an initial build: " + legacy_note)
     return "; ".join(reasons) or "no matching visible source cache"
 
 
@@ -214,8 +221,6 @@ def run_publish(args: argparse.Namespace) -> dict:
     patch_commit = git(args.patch_root, "rev-parse", "HEAD")
     reader = package_sources.RecipeReader(args.patch_root)
     resolver = package_sources.Resolver()
-    legacy_matches = {}
-    legacy_notes = {}
     try:
         records = source_records(
             sources,
@@ -237,18 +242,12 @@ def run_publish(args: argparse.Namespace) -> dict:
         )
         changed = publication_changed(current, published, args.force_rebuild)
         # Cache metadata cannot change a no-op or a forced build decision.
-        # Avoid paginated API requests (and legacy lookups) in both cases.
+        # Avoid paginated API requests in both cases.
         keys, inaccessible = (
             fetch_caches(args.repository, args.ref)
             if changed and not args.force_rebuild
             else ([], [])
         )
-        if changed and not args.force_rebuild:
-            verifier = legacy_package_cache.LegacyVerifier(
-                args.repository, reader, resolver
-            )
-            legacy_matches = verifier.matches(records, keys)
-            legacy_notes = verifier.reasons
     finally:
         resolver.close()
     result = {"patch-commit": patch_commit, "changed": changed}
@@ -259,7 +258,6 @@ def run_publish(args: argparse.Namespace) -> dict:
             args.run,
             changed=changed,
             force_rebuild=args.force_rebuild,
-            legacy_matches=legacy_matches,
             sources=sources,
         )
     )
@@ -276,13 +274,11 @@ def run_publish(args: argparse.Namespace) -> dict:
     for name in ("build-matrix", "build-extra-matrix"):
         for record in result[name]["include"]:
             old = previous.get(manifest.package_identity(record), {})
-            note = legacy_notes.get(manifest.package_identity(record))
             reason = build_reason(
                 record,
                 old,
                 inaccessible,
                 args.ref,
-                legacy_note=note,
                 force_rebuild=args.force_rebuild,
             )
             print(
@@ -291,13 +287,8 @@ def run_publish(args: argparse.Namespace) -> dict:
             )
     for batch in result["restore-matrix"]["include"]:
         for record in batch["entries"]:
-            reason = (
-                "verified legacy inputs; migrating cache"
-                if "save_cache_key" in record
-                else "matching source inputs"
-            )
             print(
-                f"{record['package']}/{record['arch']}: restore ({reason}; cache {record['cache_key']})",
+                f"{record['package']}/{record['arch']}: restore (matching source inputs; cache {record['cache_key']})",
                 file=sys.stderr,
             )
     return result

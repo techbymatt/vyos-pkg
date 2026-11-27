@@ -12,30 +12,23 @@ import sys
 from pathlib import Path
 
 try:
-    from .workflow_utils import cli_error
     from .package_catalog import (
         ARCHITECTURES,
         GROUPS,
-        architecture_policy,
         architectures,
         find_source,
     )
+    from .workflow_utils import cli_error
 except ImportError:
-    from workflow_utils import cli_error
     from package_catalog import (
         ARCHITECTURES,
         GROUPS,
-        architecture_policy,
         architectures,
         find_source,
     )
+    from workflow_utils import cli_error
 
-__all__ = ["architectures", "check_outputs", "independent_only"]
-
-
-def independent_only(group: str, package: str) -> bool:
-    """Report whether the source is classified independent_only."""
-    return architecture_policy(group, package) == "independent_only"
+__all__ = ["architectures", "check_outputs"]
 
 
 def check_outputs(group: str, package: str, arch: str, directory: Path) -> None:

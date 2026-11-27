@@ -14,15 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from .checked_edits import CheckedEdits, replace_once
+    from .checked_edits import CheckedEdits
     from .package_catalog import ARCHITECTURES, GROUPS, validate_name
     from .workflow_utils import cli_error
 except ImportError:
-    from checked_edits import CheckedEdits, replace_once
+    from checked_edits import CheckedEdits
     from package_catalog import ARCHITECTURES, GROUPS, validate_name
     from workflow_utils import cli_error
 
-__all__ = ["prepare", "prepare_extra", "prepare_udp_packaging", "replace_once"]
+__all__ = ["prepare", "prepare_extra"]
 
 
 @dataclass(frozen=True)
@@ -204,13 +204,6 @@ def prepare_strongswan(
             "cd ..; ./build-vici.sh",
             ": # python3-vici is built by amd64 only",
         )
-
-
-def prepare_udp_packaging(directory: Path) -> None:
-    """Repair the rules in the patch applied later by the recipe's git am loop."""
-    edits = CheckedEdits()
-    stage_udp_packaging(directory, edits, "", "")
-    edits.commit()
 
 
 def stage_udp_packaging(

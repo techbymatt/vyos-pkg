@@ -32,13 +32,6 @@
     "Mellanox kernel driver": "https://linux.mellanox.com/public/repo/doca/3.5.0/SOURCES/mlnx_ofed/MLNX_OFED_SRC-debian-26.07-0.7.7.0.tgz",
     "Realtek r8126 kernel driver": "https://packages.vyos.net/source-mirror/r8126-10.016.00.tar.bz2",
     "Realtek r8152 kernel driver": "https://packages.vyos.net/source-mirror/r8152-2.21.4.tar.bz2",
-    "VPP libdaq": "https://github.com/snort3/libdaq/archive/refs/tags/v3.0.21.tar.gz",
-    "VPP DPDK": "http://fast.dpdk.org/rel/dpdk-25.07.tar.xz",
-    "VPP IPsec MB": "http://github.com/intel/intel-ipsec-mb/archive/v2.0.tar.gz",
-    "VPP Octeon ROC": "https://github.com/MarvellEmbeddedProcessors/marvell-octeon-roc/archive/refs/tags/v25.09.tar.gz",
-    "VPP Quicly": "https://github.com/vpp-quic/quicly/releases/download/v0.1.5-vpp/quicly_0.1.5-vpp.tar.gz",
-    "VPP RDMA core": "http://github.com/linux-rdma/rdma-core/releases/download/v58.0/rdma-core-58.0.tar.gz",
-    "VPP XDP tools": "https://github.com/xdp-project/xdp-tools/releases/download/v1.5.5/xdp-tools-1.5.5.tar.gz",
     "Cargo crate downloads": "https://static.crates.io/crates/serde/serde-1.0.219.crate",
     "RubyGems downloads": "https://rubygems.org/downloads/fpm-1.16.0.gem"
   }

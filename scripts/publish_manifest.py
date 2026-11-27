@@ -2,8 +2,8 @@
 """Track publication inputs and the exact source inputs of every package.
 
 Repository revisions cover workflow/configuration (including Go configuration).
-Schema v2 also records patched recipe identities and resolved external Git refs;
-schema v1 remains readable for legacy-cache migration. Live APT is not locked.
+Schema v2 records patched recipe identities and resolved external Git refs.
+Live APT is not locked.
 Canonical JSON is UTF-8, sorted object keys, compact separators, a trailing newline,
 with packages sorted by (group, package, arch). Dependency text is preserved.
 The signing key input must be the PUBLIC key file; its exact bytes are hashed.
@@ -17,7 +17,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import TypedDict
 
 try:
     from . import source_identity
@@ -35,8 +35,8 @@ class Package(TypedDict):
     arch: str
     commit: str
     deps: str
-    source: NotRequired[dict]
-    source_digest: NotRequired[str]
+    source: dict
+    source_digest: str
 
 
 class Manifest(TypedDict):
@@ -68,7 +68,7 @@ def package_identity(package: Package) -> tuple[str, str, str]:
 
 
 def validate_manifest(value: object) -> Manifest:
-    """Validate exact v1/v2 shapes/types and return a sorted manifest copy."""
+    """Validate exact schema-v2 shapes/types and return a sorted manifest copy."""
     fields = {
         "schema_version",
         "repository_commit",
@@ -80,7 +80,7 @@ def validate_manifest(value: object) -> Manifest:
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("manifest must contain exactly the publication fields")
     schema = value["schema_version"]
-    if type(schema) is not int or schema not in (1, 2):
+    if type(schema) is not int or schema != 2:
         raise ValueError("unsupported schema_version")
     repository_commit = require_pattern(
         value["repository_commit"], REVISION, "repository_commit"
@@ -95,9 +95,15 @@ def validate_manifest(value: object) -> Manifest:
         raise ValueError("packages must be a non-empty array")
     packages: list[Package] = []
     seen: set[tuple[str, str, str]] = set()
-    package_fields = {"group", "package", "arch", "commit", "deps"}
-    if schema == 2:
-        package_fields |= {"source", "source_digest"}
+    package_fields = {
+        "group",
+        "package",
+        "arch",
+        "commit",
+        "deps",
+        "source",
+        "source_digest",
+    }
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != package_fields:
             raise ValueError("package must contain exactly the schema's package fields")
@@ -110,26 +116,29 @@ def validate_manifest(value: object) -> Manifest:
             raise ValueError("package deps must be a string")
         if any(ord(char) < 32 or ord(char) == 127 for char in deps):
             raise ValueError("deps must be single-line text without control characters")
+        try:
+            source = source_identity.validate_source(entry["source"])
+        except TypeError as error:
+            raise ValueError("invalid package source") from error
+        digest = require_pattern(entry["source_digest"], HEX256, "source digest")
+        if digest != source_identity.fingerprint(source):
+            raise ValueError("source digest does not match its inputs")
+        if (source["recipe_tree"] is None) != (group == "build-extra"):
+            raise ValueError("source recipe tree does not match the build group")
+        if group == "build-extra" and (
+            source["repositories"][0]["name"] != name
+            or source["repositories"][0]["commit"] != commit
+        ):
+            raise ValueError("standalone source does not match its checkout")
         package = Package(
-            group=group, package=name, arch=arch, commit=commit, deps=deps
+            group=group,
+            package=name,
+            arch=arch,
+            commit=commit,
+            deps=deps,
+            source=source,
+            source_digest=digest,
         )
-        if schema == 2:
-            try:
-                source = source_identity.validate_source(entry["source"])
-            except TypeError as error:
-                raise ValueError("invalid package source") from error
-            digest = require_pattern(entry["source_digest"], HEX256, "source digest")
-            if digest != source_identity.fingerprint(source):
-                raise ValueError("source digest does not match its inputs")
-            if (source["recipe_tree"] is None) != (group == "build-extra"):
-                raise ValueError("source recipe tree does not match the build group")
-            if group == "build-extra" and (
-                source["repositories"][0]["name"] != name
-                or source["repositories"][0]["commit"] != commit
-            ):
-                raise ValueError("standalone source does not match its checkout")
-            package["source"] = source
-            package["source_digest"] = digest
         identity = package_identity(package)
         if identity in seen:
             raise ValueError(f"duplicate package: {identity}")

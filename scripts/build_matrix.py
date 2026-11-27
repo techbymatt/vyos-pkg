@@ -130,7 +130,6 @@ def plan_publish(
     *,
     changed: bool = True,
     force_rebuild: bool = False,
-    legacy_matches: dict[tuple[str, str, str], str] | None = None,
     sources: dict | None = None,
 ) -> dict:
     """Route builds and lean restore batches without mixing native runners."""
@@ -148,15 +147,11 @@ def plan_publish(
     for record in records:
         prefix = cache_prefix(record)
         key = index.source_hit(record)
-        if key is None and not force_rebuild:
-            key = (legacy_matches or {}).get(manifest.package_identity(record))
         if key:
             # Restore/upload needs no cloned-repository descriptor, dependencies
             # or recipe revision. Keep job outputs small as the catalog grows.
             entry = {field: record[field] for field in ("group", "package", "arch")}
             entry["cache_key"] = key
-            if key.startswith("cache-v2-"):
-                entry["save_cache_key"] = prefix + run
             hits.setdefault(runner_label(record["arch"]), []).append(entry)
         else:
             identity = record["group"], record["package"]

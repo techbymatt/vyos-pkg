@@ -21,13 +21,6 @@ class BuildProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = RecipeFixture(Path(temporary))
             fixture.enable_kernel_dependencies()
-            vpp = fixture.build_root / "vpp/package.toml"
-            vpp.write_text(
-                vpp.read_text().replace(
-                    'name = "vpp"\nscm_url = "https://github.com/example/source.git"',
-                    'name = "vpp"\nscm_url = "https://example.org/vpp.git"',
-                )
-            )
             kea = fixture.build_root / "isc-kea"
             kea.mkdir()
             (kea / "package.toml").write_text(
@@ -66,7 +59,6 @@ class BuildProbeTests(unittest.TestCase):
                 inventory = targets.recipe_targets(fixture.patch_root)
         self.assertIn(["git", "Git refs", "https://example.org/patched.git"], inventory)
         self.assertIn(["git", "Git refs", "https://example.org/build.git"], inventory)
-        self.assertIn(["git", "Git refs", "https://example.org/vpp.git"], inventory)
         self.assertIn(
             ["git", "Git refs", "https://example.org/kea-debian.git"], inventory
         )

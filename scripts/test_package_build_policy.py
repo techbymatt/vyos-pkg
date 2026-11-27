@@ -33,8 +33,6 @@ class PolicyTests(unittest.TestCase):
         for package in ("net-snmp", "frr", "strongswan", "linux-kernel", "vyos-1x"):
             self.assertEqual(policy.architectures("build", package), ["amd64", "arm64"])
         self.assertEqual(policy.architectures("build", "shim-signed"), ["amd64"])
-        self.assertFalse(policy.independent_only("build", "shim-signed"))
-        self.assertTrue(policy.independent_only("build", "pyhumps"))
         self.assertEqual(
             policy.architectures("build", "unknown-test-source"), ["amd64", "arm64"]
         )

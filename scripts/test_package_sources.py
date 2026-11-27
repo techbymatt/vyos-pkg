@@ -46,13 +46,6 @@ def checkout(repo_dir, scm_url, commit_id, exists):
         run(['git', 'clone', scm_url, str(repo_dir)], check=True)
         run(['git', 'checkout', commit_id], cwd=repo_dir, check=True)
 """
-ACCEL_BUILDER = """#!/bin/sh
-if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
-    cd ../vpp/
-    ./build.py
-    cd ${CWD}
-fi
-"""
 APT_ACCEL_BUILDER = """#!/bin/sh
 VPP_VERSION=$(apt-cache policy vpp-dev | awk '/Candidate:/ {print $2}')
 apt-get download vpp=${VPP_VERSION} vpp-dev=${VPP_VERSION} \\
@@ -70,15 +63,6 @@ if [ -d .git ]; then
 fi
 git rev-parse HEAD
 """
-LEGACY_INTEL_BUILDER = """#!/bin/sh
-set -e
-cd "ethernet-linux-$1"
-if [ -d .git ]; then
-    git clean --force -d -x
-    git reset --hard origin/main
-fi
-git rev-parse HEAD
-"""
 
 
 def repository(name="source", ref="rolling", commit=COMMIT, url=URL):
@@ -92,32 +76,23 @@ def descriptor(tree=COMMIT):
 
 
 def kernel_dependencies(root, ref=COMMIT, url=URL):
-    """Add the kernel's audited driver and nested VPP recipes to a scratch tree."""
+    """Add the kernel's audited driver and accel-PPP scripts to a scratch tree."""
     directory = root / "linux-kernel"
-    (directory / "build-accel-ppp-ng.sh").write_text(ACCEL_BUILDER)
+    (directory / "build-accel-ppp-ng.sh").write_text(APT_ACCEL_BUILDER)
     (directory / "build-intel-nic.sh").write_text(INTEL_BUILDER)
-    nested = root / "vpp"
-    nested.mkdir()
-    (nested / "build.py").symlink_to("../build.py")
+    path = directory / "package.toml"
+    text = path.read_text() if path.exists() else ""
     repositories = []
-    for path, entries in (
-        (
-            directory / "package.toml",
-            [("accel-ppp-ng", "build_accel_ppp_ng"), ("igb", "build_intel_nic")],
-        ),
-        (
-            nested / "package.toml",
-            [("vyos-vpp-patches", "/bin/true"), ("vpp", "make pkg-deb")],
-        ),
+    for name, command in (
+        ("accel-ppp-ng", "build_accel_ppp_ng"),
+        ("igb", "build_intel_nic"),
     ):
-        text = path.read_text() if path.exists() else ""
-        for name, command in entries:
-            text += (
-                f'\n[[packages]]\nname = "{name}"\nscm_url = "{url}"\n'
-                f'commit_id = "{ref}"\nbuild_cmd = "{command}"\n'
-            )
-            repositories.append(repository(name, ref, url=url))
-        path.write_text(text)
+        text += (
+            f'\n[[packages]]\nname = "{name}"\nscm_url = "{url}"\n'
+            f'commit_id = "{ref}"\nbuild_cmd = "{command}"\n'
+        )
+        repositories.append(repository(name, ref, url=url))
+    path.write_text(text)
     return repositories
 
 
@@ -312,16 +287,16 @@ class RecipeScopeTests(unittest.TestCase):
         self.assertEqual(git(self.fixture.upstream, "status", "--porcelain"), "")
 
     def test_recipe_snapshots_are_memoized_without_leaking_commit_annotations(self):
-        """Resolution may annotate copies, never the current/historical cached recipe."""
+        """Resolution may annotate copies, never the cached recipe."""
         source = self.reader.recipe("frr", self.fixture.patch_commit)
         source["repositories"][0]["commit"] = OTHER_COMMIT
         source["inputs"]["unexpected"] = "value"
-        self.reader.legacy_revision("frr", self.fixture.patch_commit)
+        self.reader.recipe_revision("frr", self.fixture.patch_commit)
         with patch.object(
             sources, "git", side_effect=AssertionError("unexpected reread")
         ):
             cached = self.reader.recipe("frr", self.fixture.patch_commit)
-            self.reader.legacy_revision("frr", self.fixture.patch_commit)
+            self.reader.recipe_revision("frr", self.fixture.patch_commit)
         self.assertNotIn("commit", cached["repositories"][0])
         self.assertEqual(cached["inputs"], {})
 
@@ -392,7 +367,7 @@ class RecipeScopeTests(unittest.TestCase):
         self.assertEqual(self.read("other"), before_other)
 
     def test_old_patch_pins_are_read_without_changing_the_checkout(self):
-        """Legacy verification can reconstruct older scoped inputs safely."""
+        """Isolated index reading reconstructs arbitrary patch commits safely."""
         old_pin = self.fixture.patch_commit
         old_source = self.reader.recipe("frr", old_pin)
         path = "scripts/package-build/frr/package.toml"
@@ -408,60 +383,30 @@ class RecipeScopeTests(unittest.TestCase):
             self.fixture.upstream_commit,
         )
 
-    def test_nested_vpp_sources_and_patched_recipe_only_affect_the_kernel(self):
-        """Hash the consumed sibling recipe and both of its external repositories."""
-        self.fixture.enable_kernel_dependencies()
-        source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
-        self.assertEqual(
-            {entry["name"] for entry in source["repositories"]},
-            {"accel-ppp-ng", "igb", "vpp", "vyos-vpp-patches"},
-        )
-        self.assertEqual(
-            source["inputs"]["vpp_recipe_tree"],
-            git(self.fixture.upstream, "rev-parse", "HEAD:scripts/package-build/vpp"),
-        )
-        before = {name: self.read(name) for name in ("linux-kernel", "frr", "other")}
-        path = "scripts/package-build/vpp/package.toml"
-        self.fixture.add_patch(
-            path,
-            (self.fixture.upstream / path).read_text() + "# nested recipe update\n",
-        )
-        self.assertNotEqual(self.read("linux-kernel"), before["linux-kernel"])
-        for name in ("frr", "other"):
-            self.assertEqual(self.read(name), before[name])
-
-    def test_adding_nested_tracking_invalidates_only_incomplete_kernel_identities(self):
-        """Previously untracked VPP inputs must not reuse an incomplete source key."""
-        self.fixture.enable_kernel_dependencies()
-        source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
-        for entry in source["repositories"]:
-            entry["commit"] = entry["ref"]
-        old = copy.deepcopy(source)
-        del old["inputs"]["vpp_recipe_tree"]
-        old["repositories"] = [
-            entry
-            for entry in old["repositories"]
-            if entry["name"] not in {"vpp", "vyos-vpp-patches"}
-        ]
-        self.assertNotEqual(sources.fingerprint(old), sources.fingerprint(source))
-        for name in ("vpp", "vyos-vpp-patches"):
-            changed = copy.deepcopy(source)
-            next(entry for entry in changed["repositories"] if entry["name"] == name)[
-                "commit"
-            ] = OTHER_COMMIT
-            self.assertNotEqual(
-                sources.fingerprint(changed), sources.fingerprint(source)
-            )
-
-    def test_kernel_nested_vpp_command_drift_fails_discovery(self):
-        """Do not silently omit or guess a changed sibling build command."""
+    def test_kernel_vpp_command_drift_fails_discovery(self):
+        """Reject drifted, sibling-built, or git-cloning VPP commands."""
         self.fixture.enable_kernel_dependencies()
         for label, script in (
-            ("changed sibling dir", ACCEL_BUILDER.replace("cd ../vpp/", "cd ../other/")),
-            ("changed apt packages", APT_ACCEL_BUILDER.replace("libvppinfra-dev=${VPP_VERSION}", "vpp-plugin-core=${VPP_VERSION}")),
+            (
+                "legacy sibling build",
+                (
+                    "#!/bin/sh\nif [ ! -d ${VPP_LIB_CHECK_PATH} ]; then\n"
+                    "    cd ../vpp/\n    ./build.py\n    cd ${CWD}\nfi\n"
+                ),
+            ),
+            (
+                "changed apt packages",
+                APT_ACCEL_BUILDER.replace(
+                    "libvppinfra-dev=${VPP_VERSION}",
+                    "vpp-plugin-core=${VPP_VERSION}",
+                ),
+            ),
             ("apt plus sibling ref", APT_ACCEL_BUILDER + "echo ../vpp\n"),
-            ("apt plus git clone", APT_ACCEL_BUILDER + "git clone https://example.org/vpp.git\n"),
-            ("both nested and apt", ACCEL_BUILDER + APT_ACCEL_BUILDER),
+            (
+                "apt plus git clone",
+                APT_ACCEL_BUILDER + "git clone https://example.org/vpp.git\n",
+            ),
+            ("duplicate apt block", APT_ACCEL_BUILDER + APT_ACCEL_BUILDER),
         ):
             with self.subTest(case=label):
                 self.fixture.update_upstream(
@@ -469,30 +414,19 @@ class RecipeScopeTests(unittest.TestCase):
                     script,
                 )
                 with self.assertRaisesRegex(
-                    ValueError, "audited nested VPP build or APT sysroot"
+                    ValueError, "audited APT VPP sysroot"
                 ):
                     self.reader.recipe("linux-kernel", self.fixture.patch_commit)
 
-    def test_kernel_apt_vpp_sysroot_omits_nested_vpp_recipe_and_repos(self):
-        """APT-sourced VPP headers/libs drop the sibling VPP recipe and repos."""
+    def test_kernel_apt_vpp_sysroot_tracks_only_kernel_repositories(self):
+        """APT-sourced VPP headers/libs require no sibling VPP recipe or repos."""
         self.fixture.enable_kernel_dependencies()
-        nested_source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
-        self.fixture.update_upstream(
-            "scripts/package-build/linux-kernel/build-accel-ppp-ng.sh",
-            APT_ACCEL_BUILDER,
-        )
         apt_source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
         self.assertEqual(
             {entry["name"] for entry in apt_source["repositories"]},
             {"accel-ppp-ng", "igb"},
         )
         self.assertNotIn("vpp_recipe_tree", apt_source["inputs"])
-        for source in (nested_source, apt_source):
-            for entry in source["repositories"]:
-                entry["commit"] = entry["ref"]
-        self.assertNotEqual(
-            sources.fingerprint(nested_source), sources.fingerprint(apt_source)
-        )
 
     def test_missing_or_failed_recipes_fail_planning(self):
         """A missing source folder or unappliable patch cannot become a cache hit."""
@@ -718,7 +652,7 @@ class GitResolutionTests(unittest.TestCase):
         del recipe["repositories"][0]["commit"]
         reader = unittest.mock.Mock()
         reader.recipe.return_value = copy.deepcopy(recipe)
-        reader.legacy_revision.return_value = OTHER_COMMIT
+        reader.recipe_revision.return_value = OTHER_COMMIT
         resolved = {
             (URL, "rolling"): COMMIT,
             ("https://github.com/vyos/extra.git", "rolling"): OTHER_COMMIT,
@@ -772,35 +706,6 @@ class GitResolutionTests(unittest.TestCase):
         self.assertEqual(self.resolver.resolve(self.url, "deadbeef"), self.second)
         self.assertEqual(self.resolver.repositories, {})
 
-    def test_evidence_commit_expansion_must_preserve_the_recorded_hash_prefix(self):
-        """An API resolving a hash-like ref name cannot substitute for a checkout ID."""
-        with (
-            patch.object(resolver_module, "command_output", return_value=COMMIT),
-            self.assertRaisesRegex(ValueError, "source revision changed"),
-        ):
-            self.resolver.resolve_evidence(URL, "bbbbbbbb", COMMIT)
-
-    def test_evidence_does_not_guess_short_ids_or_clone_large_unneeded_repositories(
-        self,
-    ):
-        """Unknown-host abbreviated logs need existing metadata or a full ID."""
-        url = "https://git.kernel.org/firmware.git"
-        with (
-            patch.object(resolver_module, "command_output") as output,
-            patch.object(resolver_module, "remote_git") as remote,
-            patch.object(resolver_module, "clone_repository") as clone,
-        ):
-            with self.assertRaisesRegex(ValueError, "unverifiable abbreviated"):
-                self.resolver.resolve_evidence(url, COMMIT[:8], COMMIT)
-            self.assertEqual(
-                self.resolver.resolve_evidence(url, COMMIT, COMMIT), COMMIT
-            )
-            with self.assertRaisesRegex(ValueError, "source revision changed"):
-                self.resolver.resolve_evidence(url, COMMIT, OTHER_COMMIT)
-        output.assert_not_called()
-        remote.assert_not_called()
-        clone.assert_not_called()
-
     def test_planned_checkout_survives_a_moving_branch(self):
         """Compilation gets the planned SHA even after rolling advances."""
         checkout = self.root / "checkout"
@@ -837,7 +742,7 @@ class GitResolutionTests(unittest.TestCase):
             sources.checkout_source(checkout, self.url, "rolling")
         self.assertEqual(git(checkout, "rev-parse", "HEAD"), planned)
 
-    def test_kernel_nested_builder_and_driver_reset_preserve_planned_commits(self):
+    def test_kernel_builder_and_driver_reset_preserve_planned_commits(self):
         """Execute checkout/cleanup fixtures, never hardware compilation, against real Git."""
         git(self.remote, "branch", "main", self.second)
         root = self.root / "recipes"
@@ -864,26 +769,13 @@ class GitResolutionTests(unittest.TestCase):
                 },
             ),
         ):
-            modules = []
-            for name, path in (
-                ("shared_fixture", root / "build.py"),
-                ("kernel_fixture", directory / "build.py"),
-            ):
-                spec = importlib.util.spec_from_file_location(name, path)
-                if spec is None or spec.loader is None:
-                    raise ValueError("fixture builder cannot be imported")
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                modules.append(module)
-            shared, kernel = modules
-            checkout_shared = directory / "checkout-shared"
-            self.assertEqual(
-                shared.checkout(
-                    {"scm_url": self.url, "commit_id": "rolling"}, checkout_shared
-                ),
-                "rolling",
+            spec = importlib.util.spec_from_file_location(
+                "kernel_fixture", directory / "build.py"
             )
-            self.assertEqual(git(checkout_shared, "rev-parse", "HEAD"), self.first)
+            if spec is None or spec.loader is None:
+                raise ValueError("fixture builder cannot be imported")
+            kernel = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(kernel)
             kernel.checkout(checkout, self.url, "rolling", False)
             self.assertEqual(git(checkout, "rev-parse", "HEAD"), self.first)
             kernel.checkout(checkout, self.url, "rolling", True)
@@ -937,72 +829,47 @@ class PinRecipeTests(unittest.TestCase):
         (directory / "build.py").unlink()
         (directory / "build.py").write_text(KERNEL_BUILDER)
         repositories = [repository(), *kernel_dependencies(self.root, "rolling")]
-        before = {
-            name: (self.root / name / "package.toml").read_text()
-            for name in ("linux-kernel", "vpp")
-        }
+        before = (directory / "package.toml").read_text()
         sources.pin_recipe(self.root, "linux-kernel", repositories)
         text = (directory / "build.py").read_text()
         self.assertEqual(text.count("checkout_source(repo_dir, scm_url, commit_id)"), 2)
         compile(text, "build.py", "exec")
         shared = (self.root / "build.py").read_text()
-        self.assertIn(
-            "checkout_source(repo_dir, package['scm_url'], package['commit_id'])",
-            shared,
-        )
+        self.assertNotIn("checkout_source(", shared)
         compile(shared, "shared-build.py", "exec")
-        self.assertNotIn(
-            "git reset --hard origin/main",
-            (directory / "build-intel-nic.sh").read_text(),
-        )
-        self.assertIn(
-            "git reset --hard HEAD", (directory / "build-intel-nic.sh").read_text()
-        )
         self.assertEqual((directory / "build-intel-nic.sh").read_text(), INTEL_BUILDER)
-        for name, text in before.items():
-            self.assertEqual((self.root / name / "package.toml").read_text(), text)
+        self.assertEqual((directory / "package.toml").read_text(), before)
 
     def kernel(self):
-        """Write an audited custom kernel with driver and nested VPP sources."""
+        """Write an audited custom kernel with driver and accel-PPP sources."""
         directory = self.recipe("linux-kernel")
         (directory / "build.py").unlink()
         (directory / "build.py").write_text(KERNEL_BUILDER)
         return directory, [repository(), *kernel_dependencies(self.root, "rolling")]
 
-    def test_missing_nested_vpp_source_pins_fail_before_adapting_builders(self):
-        """A kernel matrix without both VPP sources cannot compile untracked branches."""
+    def test_missing_kernel_source_pins_fail_before_adapting_builders(self):
+        """A kernel matrix missing a declared source fails before changing builders."""
         directory, repositories = self.kernel()
         with self.assertRaisesRegex(ValueError, "planned repositories"):
             sources.pin_recipe(self.root, "linux-kernel", repositories[:-1])
         self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
         self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
-    def test_kernel_driver_legacy_reset_is_pinned(self):
-        """Older recipes still reset to the planned checkout rather than origin/main."""
-        directory, repositories = self.kernel()
-        driver = directory / "build-intel-nic.sh"
-        driver.write_text(LEGACY_INTEL_BUILDER)
-        sources.pin_recipe(self.root, "linux-kernel", repositories)
-        self.assertEqual(
-            driver.read_text(), LEGACY_INTEL_BUILDER.replace("origin/main", "HEAD")
-        )
-
     def test_kernel_driver_reset_command_drift_fails_pinning(self):
-        """Missing, changed, or extra resets fail before any builder is rewritten."""
+        """Missing, changed, legacy, or extra resets fail before any builder is rewritten."""
         directory, repositories = self.kernel()
         driver = directory / "build-intel-nic.sh"
         current = "    git reset --hard HEAD\n"
         legacy = "    git reset --hard origin/main\n"
         unexpected = "    git reset --hard origin/master\n"
         for label, reset in (
+            ("legacy origin/main", legacy),
             ("changed target", unexpected),
             ("changed options", "    git reset HEAD\n"),
             ("missing", ""),
             ("duplicate HEAD", current * 2),
-            ("duplicate legacy", legacy * 2),
             ("mixed", current + legacy),
             ("HEAD and unexpected", current + unexpected),
-            ("legacy and unexpected", legacy + unexpected),
         ):
             with self.subTest(reset=label):
                 (directory / "build.py").write_text(KERNEL_BUILDER)
@@ -1015,53 +882,27 @@ class PinRecipeTests(unittest.TestCase):
                 self.assertEqual((self.root / "build.py").read_text(), BUILDER)
                 self.assertEqual(driver.read_text(), script)
 
-    def test_kernel_nested_vpp_build_command_drift_fails_pinning(self):
-        """Keep source discovery and execution on the same audited VPP path."""
+    def test_kernel_vpp_command_drift_fails_pinning(self):
+        """Keep source discovery and execution on the same audited APT VPP sysroot."""
         directory, repositories = self.kernel()
         for label, script in (
-            ("nested drift", ACCEL_BUILDER.replace("./build.py", "./build.py --packages vpp")),
+            (
+                "legacy nested build",
+                (
+                    "#!/bin/sh\nif [ ! -d ${VPP_LIB_CHECK_PATH} ]; then\n"
+                    "    cd ../vpp/\n    ./build.py\n    cd ${CWD}\nfi\n"
+                ),
+            ),
             ("apt drift", APT_ACCEL_BUILDER.replace("dpkg-deb -x", "dpkg -i")),
         ):
             with self.subTest(case=label):
                 (directory / "build-accel-ppp-ng.sh").write_text(script)
                 with self.assertRaisesRegex(
-                    ValueError, "audited nested VPP build or APT sysroot"
+                    ValueError, "audited APT VPP sysroot"
                 ):
                     sources.pin_recipe(self.root, "linux-kernel", repositories)
                 self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
                 self.assertEqual((self.root / "build.py").read_text(), BUILDER)
-
-    def test_kernel_apt_vpp_sysroot_pins_without_nested_vpp_recipe(self):
-        """APT-sourced VPP pins only kernel repositories and ignores sibling vpp."""
-        directory, repositories = self.kernel()
-        (directory / "build-accel-ppp-ng.sh").write_text(APT_ACCEL_BUILDER)
-        shutil.rmtree(self.root / "vpp")
-        kernel_only = [
-            entry
-            for entry in repositories
-            if entry["name"] not in {"vpp", "vyos-vpp-patches"}
-        ]
-        with self.assertRaisesRegex(ValueError, "planned repositories"):
-            sources.pin_recipe(self.root, "linux-kernel", repositories)
-        sources.pin_recipe(self.root, "linux-kernel", kernel_only)
-        text = (directory / "build.py").read_text()
-        self.assertEqual(text.count("checkout_source(repo_dir, scm_url, commit_id)"), 2)
-        compile(text, "build.py", "exec")
-        shared = (self.root / "build.py").read_text()
-        self.assertNotIn("checkout_source(", shared)
-        compile(shared, "shared-build.py", "exec")
-
-    def test_kernel_nested_vpp_custom_builder_is_rejected(self):
-        """Nested clones cannot bypass the shared builder's checked adaptations."""
-        _, repositories = self.kernel()
-        (self.root / "vpp/build.py").unlink()
-        (self.root / "vpp/build.py").write_text(BUILDER)
-        with self.assertRaisesRegex(ValueError, "unaudited custom source builder"):
-            sources.pin_recipe(self.root, "linux-kernel", repositories)
-        self.assertEqual(
-            (self.root / "linux-kernel/build.py").read_text(), KERNEL_BUILDER
-        )
-        self.assertEqual((self.root / "build.py").read_text(), BUILDER)
 
     def test_kea_nested_clone_is_pinned_and_source_order_is_irrelevant(self):
         """Kea's packaging clone gets the planned revision through the helper."""
@@ -1175,23 +1016,6 @@ class UpstreamSourceTests(unittest.TestCase):
                         for item in config["packages"]
                         if item.get("scm_url")
                     ]
-                    nested_vpp = (
-                        name == "linux-kernel"
-                        and sources.kernel_uses_vpp(config)
-                        and sources.audit_kernel_vpp_build(
-                            (root / name / "build-accel-ppp-ng.sh").read_text()
-                        )
-                        == "nested"
-                    )
-                    if nested_vpp:
-                        shutil.copytree(
-                            source_root / "vpp", root / "vpp", symlinks=True
-                        )
-                        nested = tomllib.loads((root / "vpp/package.toml").read_text())
-                        repositories.extend(
-                            dict(item, commit=COMMIT)
-                            for item in sources.recipe_repositories(nested)
-                        )
                     if name == "isc-kea":
                         extra = sources.kea_repository(
                             (root / name / "prebuild.sh").read_text()
@@ -1204,16 +1028,12 @@ class UpstreamSourceTests(unittest.TestCase):
                         else root / "build.py"
                     )
                     compile(builder.read_text(), "build.py", "exec")
-                    if nested_vpp:
-                        compile(
-                            (root / "build.py").read_text(), "nested-build.py", "exec"
-                        )
                     if name == "linux-kernel" and any(
                         entry.get("build_cmd") == "build_intel_nic"
                         for entry in config["packages"]
                     ):
-                        self.assertNotIn(
-                            "git reset --hard origin/main",
+                        self.assertIn(
+                            "    git reset --hard HEAD",
                             (root / name / "build-intel-nic.sh").read_text(),
                         )
 

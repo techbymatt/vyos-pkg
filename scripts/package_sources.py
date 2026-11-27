@@ -25,7 +25,6 @@ try:
     from .prepare_package_build import stage_git_clones
     from .recipe_inputs import (
         KERNEL_VPP_APT,
-        KERNEL_VPP_BUILD,
         RecipeReader,
         audit_kernel_vpp_build,
         discover_sources,
@@ -58,8 +57,7 @@ try:
         resolve_sources,
     )
     from .workflow_utils import canonical_json as canonical_bytes
-    from .workflow_utils import cli_error
-    from .workflow_utils import command_output, git
+    from .workflow_utils import cli_error, command_output, git
 except ImportError:
     import package_catalog as catalog
     from checked_edits import CheckedEdits
@@ -68,7 +66,6 @@ except ImportError:
     from prepare_package_build import stage_git_clones
     from recipe_inputs import (
         KERNEL_VPP_APT,
-        KERNEL_VPP_BUILD,
         RecipeReader,
         audit_kernel_vpp_build,
         discover_sources,
@@ -101,45 +98,43 @@ except ImportError:
         resolve_sources,
     )
     from workflow_utils import canonical_json as canonical_bytes
-    from workflow_utils import cli_error
-    from workflow_utils import command_output, git
+    from workflow_utils import cli_error, command_output, git
 
 __all__ = [
     "GITLAB_HOSTS",
     "KEA_CLONE",
     "KERNEL_VPP_APT",
-    "KERNEL_VPP_BUILD",
     "PIN_ENV",
     "REVISION",
     "SHORT_REVISION",
     "SOURCE_JOBS",
+    "CheckedEdits",
     "RecipeReader",
     "Resolver",
+    "audit_kernel_vpp_build",
     "cache_prefix",
     "canonical_bytes",
     "catalog",
     "checkout_source",
+    "clone_repository",
     "command_output",
     "discover_sources",
     "fingerprint",
     "git",
+    "kea_repository",
+    "kernel_uses_vpp",
     "pin_recipe",
+    "recipe_repositories",
+    "remote_git",
     "resolve_sources",
     "retry_recipe_clones",
     "revision",
     "source_text",
-    "validate_repositories",
-    "validate_source",
-    "audit_kernel_vpp_build",
-    "CheckedEdits",
-    "clone_repository",
-    "remote_git",
     "stage_git_clones",
-    "kea_repository",
-    "kernel_uses_vpp",
-    "recipe_repositories",
     "stage_kea_clone",
     "stage_recipe_pins",
+    "validate_repositories",
+    "validate_source",
 ]
 
 

@@ -296,15 +296,7 @@ class PublishPlannerTests(unittest.TestCase):
         keys = [cache_key(row) for row in rows]
         for row in rows:
             if row["package"] == "linux-kernel":
-                row["source"]["inputs"]["vpp_recipe_tree"] = "b" * 40
-                row["source"]["repositories"].append(
-                    {
-                        "name": "vpp",
-                        "url": "https://github.com/FDio/vpp",
-                        "ref": "stable/2510",
-                        "commit": "b" * 40,
-                    }
-                )
+                row["source"]["inputs"]["kernel_version"] = "6.18.54"
                 row["source_digest"] = planner.package_sources.fingerprint(
                     row["source"]
                 )
@@ -423,20 +415,12 @@ class PublishPlannerTests(unittest.TestCase):
             result["restore-matrix"]["include"][0]["entries"][0]["cache_key"], key
         )
 
-    def test_legacy_keys_require_proof_and_are_saved_under_source_keys(self) -> None:
-        """Ignoring the legacy namespace alone never authorizes cache reuse."""
+    def test_unrelated_cache_keys_are_ignored(self) -> None:
+        """Non-v3 cache keys never authorize cache reuse."""
         row = record()
         key = f"cache-v2-frr-amd64-{REVISION}-{'b' * 64}-122-1"
         result = planner.plan_publish([row], [key], "123-1")
         self.assertEqual(len(result["build-matrix"]["include"]), 1)
-        proven = {("build", "frr", "amd64"): key}
-        result = planner.plan_publish([row], [key], "123-1", legacy_matches=proven)
-        entry = result["restore-matrix"]["include"][0]["entries"][0]
-        self.assertEqual(entry["cache_key"], key)
-        self.assertEqual(entry["save_cache_key"], cache_key(row, "123-1"))
-        result = planner.plan_publish(
-            [row], [key], "123-1", legacy_matches=proven, force_rebuild=True
-        )
         self.assertEqual(result["restore-matrix"]["include"], [])
 
     def test_source_records_cover_catalog_policy(self) -> None:
@@ -465,10 +449,10 @@ class PublishPlannerTests(unittest.TestCase):
 
 
 class CacheDiagnosticTests(unittest.TestCase):
-    """Final decision reasons distinguish source changes, cache scope, and migration."""
+    """Final decision reasons distinguish source changes and cache scope."""
 
-    def test_actual_source_changes_take_precedence_over_legacy_fallback_failures(self):
-        """Show the kernel version and cloned SHA, not a rejected old cache's missing log."""
+    def test_source_changes_report_inputs_recipe_tree_and_commits(self):
+        """Show the kernel version, recipe tree, and cloned SHA when inputs change."""
         old = record("linux-kernel")
         old["source"]["inputs"]["kernel_version"] = "6.18.50"
         old["source_digest"] = planner.package_sources.fingerprint(old["source"])
@@ -477,39 +461,22 @@ class CacheDiagnosticTests(unittest.TestCase):
         new["source"]["recipe_tree"] = "b" * 40
         new["source"]["repositories"][0]["commit"] = "c" * 40
         new["source_digest"] = planner.package_sources.fingerprint(new["source"])
-        reason = planner.build_reason(
-            new,
-            old,
-            [],
-            "refs/heads/rolling",
-            legacy_note="producer did not record the checkout",
-        )
+        reason = planner.build_reason(new, old, [], "refs/heads/rolling")
         self.assertIn("source inputs changed", reason)
         self.assertIn("kernel_version: 6.18.50 -> 6.18.54", reason)
         self.assertIn(f"recipe_tree: {REVISION} -> {'b' * 40}", reason)
         self.assertIn(f"linux-kernel commit: {REVISION} -> {'c' * 40}", reason)
-        self.assertNotIn("did not record", reason)
 
-    def test_matching_hidden_cache_and_unproven_legacy_inputs_are_explained(self):
-        """An existing archive can be both inaccessible and lacking fallback proof."""
+    def test_matching_hidden_cache_and_forced_rebuilds_are_explained(self):
+        """Inaccessible matching caches, forced rebuilds, and misses are distinguished."""
         row = record()
         caches = [
             {"key": cache_key(row), "ref": "refs/heads/fix/ci/caching"},
             {"key": "not-" + cache_key(row), "ref": "refs/heads/unrelated"},
         ]
-        reason = planner.build_reason(
-            row,
-            row,
-            caches,
-            "refs/heads/rolling",
-            legacy_note="producer did not record the frr checkout",
-        )
+        reason = planner.build_reason(row, row, caches, "refs/heads/rolling")
         self.assertIn(
             "matching source cache inaccessible from refs/heads/rolling: refs/heads/fix/ci/caching",
-            reason,
-        )
-        self.assertIn(
-            "legacy migration requires an initial build: producer did not record the frr checkout",
             reason,
         )
         self.assertNotIn("unrelated", reason)
@@ -711,7 +678,7 @@ class PublishBoundaryTests(unittest.TestCase):
         )
 
     def test_hidden_matching_caches_are_only_used_for_diagnostics(self):
-        """The real publish boundary never passes inaccessible keys to migration or restore."""
+        """The real publish boundary never passes inaccessible keys to restore."""
         self.run_publish()
         rows = planner.manifest.load_manifest(self.root / "input-manifest.json")[
             "packages"
@@ -724,49 +691,12 @@ class PublishBoundaryTests(unittest.TestCase):
             }
             for row in rows
         ]
-        with patch.object(
-            planner.legacy_package_cache.LegacyVerifier, "matches", return_value={}
-        ) as proof:
-            result, _ = self.run_publish()
-        self.assertEqual(proof.call_args.args[1], [])
+        result, _ = self.run_publish()
         self.assertEqual(result["restore-matrix"]["include"], [])
         self.assertIn(
             "matching source cache inaccessible from refs/heads/topic: refs/heads/fix/ci/caching",
             self.diagnostics,
         )
-
-    def test_verified_legacy_inputs_are_wired_to_the_restore_save_entry(self) -> None:
-        """Verified old archives migrate using the new source key in the same run."""
-        key = f"cache-v2-linux-kernel-amd64-{REVISION}-{'b' * 64}-122-1"
-        self.caches = [
-            {"key": key, "ref": "refs/heads/main", "created_at": "2026-01-01"}
-        ]
-        with patch.object(
-            planner.legacy_package_cache.LegacyVerifier,
-            "matches",
-            return_value={("build", "linux-kernel", "amd64"): key},
-        ) as proof:
-            result, _ = self.run_publish()
-        proof.assert_called_once()
-        entry = result["restore-matrix"]["include"][0]["entries"][0]
-        self.assertEqual(entry["cache_key"], key)
-        self.assertEqual(
-            entry["save_cache_key"], cache_key(record("linux-kernel"), "123-1")
-        )
-
-    def test_forced_and_unchanged_publications_do_not_query_legacy_evidence(
-        self,
-    ) -> None:
-        """Source proof is only needed when publication will restore old archives."""
-        self.run_publish()
-        self.published = (self.root / "input-manifest.json").read_text()
-        with patch.object(
-            planner.legacy_package_cache.LegacyVerifier, "matches"
-        ) as proof:
-            self.assertFalse(self.run_publish()[0]["changed"])
-            self.args.force_rebuild = True
-            self.assertTrue(self.run_publish()[0]["changed"])
-        proof.assert_not_called()
 
     def test_forced_and_unchanged_publications_skip_paginated_cache_metadata(
         self,

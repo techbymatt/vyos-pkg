@@ -35,7 +35,7 @@ class WorkflowUtilsTests(unittest.TestCase):
         self.assertEqual(utils.command_output(command, strip=False), "0  \n")
 
     def test_command_failures_keep_stderr(self):
-        """Metadata-service errors retain evidence for diagnostics and legacy proof."""
+        """Metadata-service errors retain stderr evidence for diagnostics."""
         with self.assertRaises(subprocess.CalledProcessError) as error:
             utils.command_output(
                 [

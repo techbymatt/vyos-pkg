@@ -81,22 +81,15 @@ class TestWorkflowTests(unittest.TestCase):
             text.index("python3 build.py"),
         )
 
-    def test_restore_migration_requires_an_exact_hit_and_validated_outputs(self):
-        """Migrated caches preserve compression/paths and save only checked outputs."""
+    def test_restore_requires_exact_hit_and_cleans_up_without_saving(self):
+        """Restore preserves compression/paths, uploads only on exact hits, and never saves."""
         text = (ACTIONS / "restore-package/action.yaml").read_text()
-        self.assertIn(
-            "steps.restore.outputs.cache-hit == 'true' && fromJSON(inputs.entry).save_cache_key != null",
-            text,
-        )
-        self.assertIn("uses: actions/cache/save@", text)
-        self.assertIn("key: ${{ fromJSON(inputs.entry).save_cache_key }}", text)
-        self.assertEqual(text.count("path: ${{ steps.paths.outputs.cache }}"), 2)
+        self.assertIn("steps.restore.outputs.cache-hit == 'true'", text)
+        self.assertNotIn("actions/cache/save@", text)
+        self.assertNotIn("save_cache_key", text)
+        self.assertEqual(text.count("path: ${{ steps.paths.outputs.cache }}"), 1)
         self.assertLess(
             text.index("name: Check and upload package artifacts"),
-            text.index("uses: actions/cache/save@"),
-        )
-        self.assertLess(
-            text.index("uses: actions/cache/save@"),
             text.index("name: Clean up restored package files"),
         )
         self.assertNotIn("restore-keys:", text)
