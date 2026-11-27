@@ -24,6 +24,7 @@ try:
     from .package_cache import cache_prefix
     from .prepare_package_build import stage_git_clones
     from .recipe_inputs import (
+        KERNEL_VPP_APT,
         KERNEL_VPP_BUILD,
         RecipeReader,
         audit_kernel_vpp_build,
@@ -66,6 +67,7 @@ except ImportError:
     from package_cache import cache_prefix
     from prepare_package_build import stage_git_clones
     from recipe_inputs import (
+        KERNEL_VPP_APT,
         KERNEL_VPP_BUILD,
         RecipeReader,
         audit_kernel_vpp_build,
@@ -105,6 +107,7 @@ except ImportError:
 __all__ = [
     "GITLAB_HOSTS",
     "KEA_CLONE",
+    "KERNEL_VPP_APT",
     "KERNEL_VPP_BUILD",
     "PIN_ENV",
     "REVISION",

@@ -53,6 +53,14 @@ if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
     cd ${CWD}
 fi
 """
+APT_ACCEL_BUILDER = """#!/bin/sh
+VPP_VERSION=$(apt-cache policy vpp-dev | awk '/Candidate:/ {print $2}')
+apt-get download vpp=${VPP_VERSION} vpp-dev=${VPP_VERSION} \\
+    libvppinfra=${VPP_VERSION} libvppinfra-dev=${VPP_VERSION}
+for deb in *.deb; do
+    dpkg-deb -x ${deb} ${VPP_SYSROOT}
+done
+"""
 INTEL_BUILDER = """#!/bin/sh
 set -e
 cd "ethernet-linux-$1"
@@ -448,12 +456,43 @@ class RecipeScopeTests(unittest.TestCase):
     def test_kernel_nested_vpp_command_drift_fails_discovery(self):
         """Do not silently omit or guess a changed sibling build command."""
         self.fixture.enable_kernel_dependencies()
+        for label, script in (
+            ("changed sibling dir", ACCEL_BUILDER.replace("cd ../vpp/", "cd ../other/")),
+            ("changed apt packages", APT_ACCEL_BUILDER.replace("libvppinfra-dev=${VPP_VERSION}", "vpp-plugin-core=${VPP_VERSION}")),
+            ("apt plus sibling ref", APT_ACCEL_BUILDER + "echo ../vpp\n"),
+            ("apt plus git clone", APT_ACCEL_BUILDER + "git clone https://example.org/vpp.git\n"),
+            ("both nested and apt", ACCEL_BUILDER + APT_ACCEL_BUILDER),
+        ):
+            with self.subTest(case=label):
+                self.fixture.update_upstream(
+                    "scripts/package-build/linux-kernel/build-accel-ppp-ng.sh",
+                    script,
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "audited nested VPP build or APT sysroot"
+                ):
+                    self.reader.recipe("linux-kernel", self.fixture.patch_commit)
+
+    def test_kernel_apt_vpp_sysroot_omits_nested_vpp_recipe_and_repos(self):
+        """APT-sourced VPP headers/libs drop the sibling VPP recipe and repos."""
+        self.fixture.enable_kernel_dependencies()
+        nested_source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
         self.fixture.update_upstream(
             "scripts/package-build/linux-kernel/build-accel-ppp-ng.sh",
-            ACCEL_BUILDER.replace("cd ../vpp/", "cd ../other/"),
+            APT_ACCEL_BUILDER,
         )
-        with self.assertRaisesRegex(ValueError, "audited nested VPP build"):
-            self.reader.recipe("linux-kernel", self.fixture.patch_commit)
+        apt_source = self.reader.recipe("linux-kernel", self.fixture.patch_commit)
+        self.assertEqual(
+            {entry["name"] for entry in apt_source["repositories"]},
+            {"accel-ppp-ng", "igb"},
+        )
+        self.assertNotIn("vpp_recipe_tree", apt_source["inputs"])
+        for source in (nested_source, apt_source):
+            for entry in source["repositories"]:
+                entry["commit"] = entry["ref"]
+        self.assertNotEqual(
+            sources.fingerprint(nested_source), sources.fingerprint(apt_source)
+        )
 
     def test_missing_or_failed_recipes_fail_planning(self):
         """A missing source folder or unappliable patch cannot become a cache hit."""
@@ -977,13 +1016,40 @@ class PinRecipeTests(unittest.TestCase):
                 self.assertEqual(driver.read_text(), script)
 
     def test_kernel_nested_vpp_build_command_drift_fails_pinning(self):
-        """Keep source discovery and execution on the same audited sibling recipe."""
+        """Keep source discovery and execution on the same audited VPP path."""
         directory, repositories = self.kernel()
-        (directory / "build-accel-ppp-ng.sh").write_text(
-            ACCEL_BUILDER.replace("./build.py", "./build.py --packages vpp")
-        )
-        with self.assertRaisesRegex(ValueError, "audited nested VPP build"):
+        for label, script in (
+            ("nested drift", ACCEL_BUILDER.replace("./build.py", "./build.py --packages vpp")),
+            ("apt drift", APT_ACCEL_BUILDER.replace("dpkg-deb -x", "dpkg -i")),
+        ):
+            with self.subTest(case=label):
+                (directory / "build-accel-ppp-ng.sh").write_text(script)
+                with self.assertRaisesRegex(
+                    ValueError, "audited nested VPP build or APT sysroot"
+                ):
+                    sources.pin_recipe(self.root, "linux-kernel", repositories)
+                self.assertEqual((directory / "build.py").read_text(), KERNEL_BUILDER)
+                self.assertEqual((self.root / "build.py").read_text(), BUILDER)
+
+    def test_kernel_apt_vpp_sysroot_pins_without_nested_vpp_recipe(self):
+        """APT-sourced VPP pins only kernel repositories and ignores sibling vpp."""
+        directory, repositories = self.kernel()
+        (directory / "build-accel-ppp-ng.sh").write_text(APT_ACCEL_BUILDER)
+        shutil.rmtree(self.root / "vpp")
+        kernel_only = [
+            entry
+            for entry in repositories
+            if entry["name"] not in {"vpp", "vyos-vpp-patches"}
+        ]
+        with self.assertRaisesRegex(ValueError, "planned repositories"):
             sources.pin_recipe(self.root, "linux-kernel", repositories)
+        sources.pin_recipe(self.root, "linux-kernel", kernel_only)
+        text = (directory / "build.py").read_text()
+        self.assertEqual(text.count("checkout_source(repo_dir, scm_url, commit_id)"), 2)
+        compile(text, "build.py", "exec")
+        shared = (self.root / "build.py").read_text()
+        self.assertNotIn("checkout_source(", shared)
+        compile(shared, "shared-build.py", "exec")
 
     def test_kernel_nested_vpp_custom_builder_is_rejected(self):
         """Nested clones cannot bypass the shared builder's checked adaptations."""
@@ -1109,7 +1175,15 @@ class UpstreamSourceTests(unittest.TestCase):
                         for item in config["packages"]
                         if item.get("scm_url")
                     ]
-                    if name == "linux-kernel" and sources.kernel_uses_vpp(config):
+                    nested_vpp = (
+                        name == "linux-kernel"
+                        and sources.kernel_uses_vpp(config)
+                        and sources.audit_kernel_vpp_build(
+                            (root / name / "build-accel-ppp-ng.sh").read_text()
+                        )
+                        == "nested"
+                    )
+                    if nested_vpp:
                         shutil.copytree(
                             source_root / "vpp", root / "vpp", symlinks=True
                         )
@@ -1130,10 +1204,14 @@ class UpstreamSourceTests(unittest.TestCase):
                         else root / "build.py"
                     )
                     compile(builder.read_text(), "build.py", "exec")
-                    if name == "linux-kernel" and sources.kernel_uses_vpp(config):
+                    if nested_vpp:
                         compile(
                             (root / "build.py").read_text(), "nested-build.py", "exec"
                         )
+                    if name == "linux-kernel" and any(
+                        entry.get("build_cmd") == "build_intel_nic"
+                        for entry in config["packages"]
+                    ):
                         self.assertNotIn(
                             "git reset --hard origin/main",
                             (root / name / "build-intel-nic.sh").read_text(),

@@ -116,7 +116,9 @@ Nested clones require both **discovery** (`recipe_inputs.py`) and **pinning**
 (`source_pinning.py`).
 Declared `scm_url`/`commit_id` repositories are automatic; shell/custom clones
 are not. Audit their exact commands and fail on drift. Scope external files only
-to their consumer. The kernel's VPP recipe/repos and certificates/defaults, Kea's
+to their consumer. The kernel's certificates/defaults (and historical sibling VPP
+recipe/repos when accel-PPP builds VPP from source; current recipes unpack VPP
+from APT, which is a live APT input refreshed via `force_rebuild`), Kea's
 packaging clone, and Intel's cleanup reset are existing examples.
 
 Execution must remain: downstream patches → build-mode preparation → source
