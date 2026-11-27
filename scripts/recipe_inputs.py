@@ -29,6 +29,11 @@ KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
     ./build.py
     cd ${CWD}
 fi"""
+KERNEL_VPP_APT = """apt-get download vpp=${VPP_VERSION} vpp-dev=${VPP_VERSION} \\
+    libvppinfra=${VPP_VERSION} libvppinfra-dev=${VPP_VERSION}
+for deb in *.deb; do
+    dpkg-deb -x ${deb} ${VPP_SYSROOT}
+done"""
 
 
 class RecipeReader:
@@ -130,10 +135,13 @@ class RecipeReader:
             inputs["certificates"] = hashlib.sha256(
                 canonical_bytes(certificates)
             ).hexdigest()
-            if kernel_uses_vpp(config):
-                audit_kernel_vpp_build(
+            if (
+                kernel_uses_vpp(config)
+                and audit_kernel_vpp_build(
                     self.text(tree, f"{directory}/build-accel-ppp-ng.sh")
                 )
+                == "nested"
+            ):
                 nested = self.recipe("vpp", patch_commit)
                 inputs["vpp_recipe_tree"] = nested["recipe_tree"]
                 repositories.extend(nested["repositories"])
@@ -182,10 +190,26 @@ def kernel_uses_vpp(config: dict) -> bool:
     )
 
 
-def audit_kernel_vpp_build(script: str) -> None:
-    """Require the audited sibling build rather than guessing a changed clone path."""
-    if script.count(KERNEL_VPP_BUILD) != 1:
-        raise ValueError("linux-kernel: expected one audited nested VPP build")
+def audit_kernel_vpp_build(script: str) -> str:
+    """Require one audited VPP dependency path rather than guessing drift.
+
+    Older recipes built the sibling VPP recipe from source; newer recipes
+    unpack VPP development packages from APT into a temporary sysroot.
+    """
+    nested = script.count(KERNEL_VPP_BUILD)
+    apt = script.count(KERNEL_VPP_APT)
+    if nested == 1 and apt == 0:
+        return "nested"
+    if (
+        apt == 1
+        and nested == 0
+        and "../vpp" not in script
+        and "git clone" not in script
+    ):
+        return "apt"
+    raise ValueError(
+        "linux-kernel: expected one audited nested VPP build or APT sysroot"
+    )
 
 
 def kea_repository(script: str) -> dict:

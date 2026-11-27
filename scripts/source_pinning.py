@@ -93,8 +93,12 @@ def stage_recipe_pins(
     config = tomllib.loads((directory / "package.toml").read_text())
     expected = recipe_repositories(config)
     nested = []
-    if package == "linux-kernel" and kernel_uses_vpp(config):
-        audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
+    if (
+        package == "linux-kernel"
+        and kernel_uses_vpp(config)
+        and audit_kernel_vpp_build((directory / "build-accel-ppp-ng.sh").read_text())
+        == "nested"
+    ):
         nested = recipe_repositories(
             tomllib.loads((root / "vpp/package.toml").read_text())
         )
