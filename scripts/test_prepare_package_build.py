@@ -203,9 +203,15 @@ class UdpPrepareTests(unittest.TestCase):
             with self.subTest(patch=patch), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 path = write_udp_recipe(root, patch)
+                builder = (root / "build.py").read_text()
+                toml = (root / "udp-broadcast-relay/package.toml").read_text()
                 with self.assertRaises(ValueError):
-                    prepare.prepare_udp_packaging(root / "udp-broadcast-relay")
+                    prepare.prepare(root, "udp-broadcast-relay", "amd64")
                 self.assertEqual(path.read_text(), patch)
+                self.assertEqual((root / "build.py").read_text(), builder)
+                self.assertEqual(
+                    (root / "udp-broadcast-relay/package.toml").read_text(), toml
+                )
 
 
 class ExtraPrepareTests(unittest.TestCase):

@@ -16,7 +16,8 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 try:
-    from .recipe_inputs import discover_sources
+    from .git_network import clone_repository, remote_git
+    from .recipe_inputs import RecipeReader, discover_sources
     from .source_identity import (
         REVISION,
         fingerprint,
@@ -25,9 +26,9 @@ try:
         validate_source,
     )
     from .workflow_utils import command_output, git
-    from .git_network import clone_repository, remote_git
 except ImportError:
-    from recipe_inputs import discover_sources
+    from git_network import clone_repository, remote_git
+    from recipe_inputs import RecipeReader, discover_sources
     from source_identity import (
         REVISION,
         fingerprint,
@@ -36,7 +37,6 @@ except ImportError:
         validate_source,
     )
     from workflow_utils import command_output, git
-    from git_network import clone_repository, remote_git
 
 SHORT_REVISION = r"[0-9a-fA-F]{7,39}"
 GITLAB_HOSTS = {"salsa.debian.org", "gitlab.com", "gitlab.isc.org"}
@@ -100,7 +100,7 @@ class Resolver:
         """Resolve independent remotes concurrently, serializing refs per URL.
 
         All requests for one URL share one ls-remote snapshot and metadata clone.
-        Do not parallelize recipes/isolated-index patching or legacy proof state.
+        Do not parallelize recipes or isolated-index patching.
         Results and exceptions are consumed in deterministic URL order.
         """
         if jobs < 1:
@@ -173,34 +173,6 @@ class Resolver:
             )
         return revision(commit)
 
-    def resolve_evidence(self, url: str, abbreviated: str, expected: str) -> str:
-        """Expand legacy IDs without cloning large repositories just for proof.
-
-        Commit APIs and metadata clones already needed by current recipes can
-        resolve abbreviated IDs unambiguously. Other hosts need a full recorded
-        ID; a tag name or matching short prefix alone is not sufficient proof.
-        """
-        if (
-            re.fullmatch(REVISION, abbreviated) is None
-            and (url, abbreviated) not in self.commits
-            and url not in self.repositories
-            and urlsplit(url).hostname not in GITLAB_HOSTS | {"github.com"}
-        ):
-            raise ValueError(
-                "producer recorded only an unverifiable abbreviated checkout"
-            )
-        identity = url, abbreviated
-        if identity not in self.commits:
-            self.commits[identity] = (
-                revision(abbreviated)
-                if re.fullmatch(REVISION, abbreviated)
-                else self.abbreviated_commit(url, abbreviated)
-            )
-        actual = self.commits[identity]
-        if actual != expected or not actual.startswith(abbreviated.lower()):
-            raise ValueError("recipe-cloned source revision changed")
-        return actual
-
 
 def resolve_sources(
     reader: RecipeReader,
@@ -212,8 +184,8 @@ def resolve_sources(
 ) -> dict:
     """Discover sources serially, then resolve independent remotes in parallel."""
     descriptions = discover_sources(reader, sources, patch_commit)
-    legacy = {
-        (group, name): reader.legacy_revision(name, patch_commit)
+    revisions = {
+        (group, name): reader.recipe_revision(name, patch_commit)
         for group, name in descriptions
         if group == "build"
     }
@@ -227,7 +199,7 @@ def resolve_sources(
             repository["commit"] = commits[repository["url"], repository["ref"]]
         source = validate_source(source)
         result[identity] = {
-            "commit": legacy.get(identity) or source["repositories"][0]["commit"],
+            "commit": revisions.get(identity) or source["repositories"][0]["commit"],
             "source": source,
             "source_digest": fingerprint(source),
         }

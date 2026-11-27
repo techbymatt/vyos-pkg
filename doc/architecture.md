@@ -19,7 +19,7 @@ package_catalog.json
                 │                    │
         deployed manifest comparison │
                 │                    │
-        visible cache / legacy proof │
+        visible source cache lookup  │
                 └──────────┬─────────┘
                            │
                     build_matrix.py
@@ -49,7 +49,7 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/build_matrix.py` | Deterministic native matrices, execution settings, build priorities, restore batches and complete producer plans. |
 | `scripts/plan_builds.py` | Git/GitHub/Pages boundaries, manifest comparison, diagnostics and `GITHUB_OUTPUT`. |
 | `scripts/source_identity.py` | Pure descriptor validation and canonical source hashing. No cloning/build policy. |
-| `scripts/recipe_inputs.py` | Patched/historical recipe readers and scoped source discovery; no network access. |
+| `scripts/recipe_inputs.py` | Patched recipe readers and scoped source discovery; no network access. |
 | `scripts/source_resolver.py` | Bounded Git ref resolution: one ls-remote snapshot per URL, commit-API expansion for abbreviated hashes, concurrency-limited. |
 | `scripts/source_pinning.py` | Audited checkouts and pins applied to planned full commits without changing version labels. |
 | `scripts/package_sources.py` | Compatibility facade and CLI (`pin`, `retry-clones`, `checkout`); re-exports the historical API for upstream builders. |
@@ -57,7 +57,6 @@ package caches or publishes; a forced Publish never selects a cache hit.
 | `scripts/git_network.py` | Scoped Git transport timeouts and retries; clean staging for clone attempts. |
 | `scripts/kernel_keys.py` | Retry lookup of the kernel recipe's public signing keys. |
 | `scripts/package_cache.py` | Source-key prefixes and newest-first visible key indexing. |
-| `scripts/legacy_package_cache.py` | Conservative v2-cache proofs from producer artifacts, historical recipes and successful build-step checkout evidence. |
 | `scripts/prepare_package_build.py` | Audited binary command registry and recipe/standalone preparation hooks. |
 | `scripts/checked_edits.py` | Validate/stage every exact replacement before writing upstream files. |
 | `scripts/package_build_policy.py` | Enforce a source's binary-output ownership using Debian control metadata. |
@@ -72,7 +71,7 @@ scripts.<module>`. `package_sources.py` is the compatibility facade: the
 implementation lives in `recipe_inputs.py`, `source_resolver.py` and
 `source_pinning.py`. It retains the checkout helper imported by adapted upstream
 builders (`from package_sources import checkout_source`); do not break that
-import. Manifests continue to use schema v2 and remain able to read v1 proofs.
+import. Manifests use schema v2 with complete source descriptors.
 
 ## Adding a standard source
 
@@ -116,18 +115,18 @@ Nested clones require both **discovery** (`recipe_inputs.py`) and **pinning**
 (`source_pinning.py`).
 Declared `scm_url`/`commit_id` repositories are automatic; shell/custom clones
 are not. Audit their exact commands and fail on drift. Scope external files only
-to their consumer. The kernel's certificates/defaults (and historical sibling VPP
-recipe/repos when accel-PPP builds VPP from source; current recipes unpack VPP
-from APT, which is a live APT input refreshed via `force_rebuild`), Kea's
-packaging clone, and Intel's cleanup reset are existing examples.
+to their consumer. The kernel's certificates/defaults (its accel-PPP build
+unpacks VPP from APT, which is audited against drift and refreshed via
+`force_rebuild`), Kea's packaging clone, and Intel's cleanup reset are existing
+examples.
 
 Execution must remain: downstream patches → build-mode preparation → source
 pinning (Publish) → build. Keep original ref labels for version metadata; checkout
 only the planned full commits. Never compile duplicate independent outputs on
 arm64 and delete them afterward.
 
-Both Test and Publish route audited recipe clones (including the kernel, nested
-VPP, and Kea) through `git_network.py`. Publish also uses it for Git ref lookups,
+Both Test and Publish route audited recipe clones (including the kernel and Kea)
+through `git_network.py`. Publish also uses it for Git ref lookups,
 metadata clones, and fetches of missing pinned commits. Git aborts stalled HTTP
 transfers after 60s below 1 byte/s; each command also has a wall-clock limit.
 While preparing the kernel recipe, the GPG key lookup is also adapted to retry
@@ -162,7 +161,7 @@ known targets and flag the missing recipe inventory.
 The probe requests Git's ref advertisement, WKD policies and public keys on both
 hosts, the kernel signature, APT index URLs from the container, and the
 endpoints listed in `scripts/build_probe_resources.json`. Large archives use
-HEAD. Keep the audited Boost, kernel-driver and VPP download URLs in that file
+HEAD. Keep the audited Boost and kernel-driver download URLs in that file
 in sync with the recipes; registry URLs are reachability samples, not dependency
 locks. The probe does not fetch Git objects or recursively resolve dependencies
 of Cargo, Go, pip, RubyGems or APT, and cannot diagnose registry pulls or GitHub
@@ -182,7 +181,7 @@ Results are diagnostic only and do not change build or publication gates.
 - Unchanged publications and forced rebuilds skip cache-list API requests.
   Metadata-service outages otherwise fail planning, never cause mass rebuilding.
 - Source-cache keys are indexed once, newest first. Inaccessible ref metadata is
-  diagnostic only. Legacy archives need independent proof before reuse.
+  diagnostic only.
 - Restore entries contain only the fields actually consumed by the actions.
   Up to eight entries share a native runner. The fixed YAML slots and
   `RESTORE_BATCH_SIZE` are checked together; do not change only one side.
@@ -215,9 +214,8 @@ unchanged sources or refresh live APT inputs.
 Cache path **order and scope** are part of the GitHub cache version. Keep binary
 paths first and the historical recipe metadata wildcard intact. Builders and
 restore jobs share the gzip-compatibility action; do not independently choose
-compression in one workflow. Save migrated keys only after exact-hit/output
-checks. Restore cleanup removes matching files only, never source trees or
-external symlink targets.
+compression in one workflow. Restore cleanup removes matching files only, never
+source trees or external symlink targets.
 
 Verify downloads remain unmerged in `deb-<source>-<arch>` directories. Both
 callers pass the exact producer list and architecture set from the planner.

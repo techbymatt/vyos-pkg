@@ -24,11 +24,6 @@ except ImportError:
     from workflow_utils import canonical_json as canonical_bytes
     from workflow_utils import git
 
-KERNEL_VPP_BUILD = """if [ ! -d ${VPP_LIB_CHECK_PATH} ]; then
-    cd ../vpp/
-    ./build.py
-    cd ${CWD}
-fi"""
 KERNEL_VPP_APT = """apt-get download vpp=${VPP_VERSION} vpp-dev=${VPP_VERSION} \\
     libvppinfra=${VPP_VERSION} libvppinfra-dev=${VPP_VERSION}
 for deb in *.deb; do
@@ -37,11 +32,10 @@ done"""
 
 
 class RecipeReader:
-    """Read current/historical patched recipes through isolated Git indexes.
+    """Read patched recipes through isolated Git indexes.
 
     Applying the same patches with --cached --3way produces the same tracked
     tree as the build checkout, without rewriting its worktree or real index.
-    Historical trees are used only to prove legacy-cache source identities.
     """
 
     def __init__(self, patch_root: Path) -> None:
@@ -99,7 +93,7 @@ class RecipeReader:
         identity = package, patch_commit
         if identity not in self.recipes:
             self.recipes[identity] = self.read_recipe(package, patch_commit)
-        # Resolution/legacy proof annotates repository dictionaries with commits.
+        # Resolution annotates repository dictionaries with commits.
         # Never let those annotations mutate the cached discovery snapshot.
         return copy.deepcopy(self.recipes[identity])
 
@@ -135,24 +129,18 @@ class RecipeReader:
             inputs["certificates"] = hashlib.sha256(
                 canonical_bytes(certificates)
             ).hexdigest()
-            if (
-                kernel_uses_vpp(config)
-                and audit_kernel_vpp_build(
+            if kernel_uses_vpp(config):
+                audit_kernel_vpp_build(
                     self.text(tree, f"{directory}/build-accel-ppp-ng.sh")
                 )
-                == "nested"
-            ):
-                nested = self.recipe("vpp", patch_commit)
-                inputs["vpp_recipe_tree"] = nested["recipe_tree"]
-                repositories.extend(nested["repositories"])
         return {
             "recipe_tree": recipe_tree,
             "inputs": inputs,
             "repositories": repositories,
         }
 
-    def legacy_revision(self, package: str, patch_commit: str) -> str:
-        """Retain the original path revision for diagnostics and legacy lookups."""
+    def recipe_revision(self, package: str, patch_commit: str) -> str:
+        """Read the latest upstream recipe path commit for manifest diagnostics."""
         catalog.validate_name(package)
         identity = package, patch_commit
         if identity in self.revisions:
@@ -184,32 +172,21 @@ def recipe_repositories(config: dict) -> list[dict]:
 
 
 def kernel_uses_vpp(config: dict) -> bool:
-    """Identify the kernel sub-build which consumes the sibling VPP recipe."""
+    """Identify the kernel sub-build which consumes VPP development packages."""
     return any(
         entry.get("build_cmd") == "build_accel_ppp_ng" for entry in config["packages"]
     )
 
 
-def audit_kernel_vpp_build(script: str) -> str:
-    """Require one audited VPP dependency path rather than guessing drift.
-
-    Older recipes built the sibling VPP recipe from source; newer recipes
-    unpack VPP development packages from APT into a temporary sysroot.
-    """
-    nested = script.count(KERNEL_VPP_BUILD)
-    apt = script.count(KERNEL_VPP_APT)
-    if nested == 1 and apt == 0:
-        return "nested"
+def audit_kernel_vpp_build(script: str) -> None:
+    """Require the audited APT VPP sysroot rather than guessing drift."""
     if (
-        apt == 1
-        and nested == 0
+        script.count(KERNEL_VPP_APT) == 1
         and "../vpp" not in script
         and "git clone" not in script
     ):
-        return "apt"
-    raise ValueError(
-        "linux-kernel: expected one audited nested VPP build or APT sysroot"
-    )
+        return
+    raise ValueError("linux-kernel: expected one audited APT VPP sysroot")
 
 
 def kea_repository(script: str) -> dict:
